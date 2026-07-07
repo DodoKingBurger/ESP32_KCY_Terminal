@@ -1,0 +1,932 @@
+﻿<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>ESP32 Terminal</title>
+<script src="/xterm.js"></script>
+<link rel="stylesheet" href="/xterm.css">
+<style>
+* { box-sizing: border-box; }
+html, body {
+    margin: 0;
+    height: 100%;
+    background: #0b0f14;
+    color: #00ff88;
+    font-family: Consolas, monospace;
+    overflow: hidden;
+}
+body {
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+}
+/* --- Верхняя панель --- */
+.topbar {
+    height: 36px;
+    background: #111827;
+    border-bottom: 1px solid #1f2937;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 10px;
+    flex-shrink: 0;
+}
+.topbar > div:first-child {
+    font-size: 14px;
+    white-space: nowrap;
+}
+.status {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+}
+.dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: red;
+    flex-shrink: 0;
+}
+.dot.connected { background: #00ff88; }
+
+/* --- Вкладки --- */
+.tabs {
+    display: flex;
+    background: #111827;
+    border-bottom: 1px solid #1f2937;
+    flex-shrink: 0;
+}
+.tab {
+    flex: 1;
+    height: 32px;
+    background: #111827;
+    color: #aaa;
+    border: none;
+    cursor: pointer;
+    font-size: 13px;
+}
+.tab.active {
+    color: #00ff88;
+    border-bottom: 3px solid #00ff88;
+}
+
+/* --- Основной макет --- */
+.main-layout { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+.terminal-layout { flex: 1; display: flex; min-height: 0; }
+
+/* --- Боковые панели --- */
+.side-buttons {
+    width: 70px;
+    background: #111827;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 4px 4px;
+    flex-shrink: 0;
+}
+.side-buttons button {
+    width: 100%;
+    height: 32px;
+    background: #1e293b;
+    color: #00ff88;
+    border: 1px solid #334155;
+    border-radius: 3px;
+    cursor: pointer;
+    font-size: 11px;
+    font-family: Consolas, monospace;
+}
+.side-buttons button:active { background: #3b4a6b; }
+
+/* --- Центральная панель --- */
+.center-panel {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+}
+
+/* --- Панель состояния (лампы) внутри центральной панели --- */
+.state-panel {
+    display: flex;
+    justify-content: center;
+    gap: 20px;
+    padding: 2px 8px;
+    background: #111827;
+    border-bottom: 1px solid #1f2937;
+    flex-shrink: 0;
+    flex-wrap: wrap;
+}
+.state-item {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 12px;
+}
+.state-led {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    background: #222;
+    border: 1px solid #555;
+    flex-shrink: 0;
+}
+.state-led.active-stop { background: #ff3333; box-shadow: 0 0 8px #ff3333; }
+.state-led.active-wait { background: #ffaa00; box-shadow: 0 0 8px #ffaa00; }
+.state-led.active-run  { background: #00ff88; box-shadow: 0 0 8px #00ff88; }
+
+#terminal-container {
+    flex: 1;
+    background: black;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    overflow: hidden;
+    min-height: 0;
+    padding: 0;
+}
+
+/* --- Нижние кнопки --- */
+.bottom-buttons {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 2px;
+    padding: 2px 4px;
+    background: #111827;
+    border-top: 1px solid #1f2937;
+    flex-shrink: 0;
+}
+.bottom-buttons button {
+    height: 30px;
+    background: #1e293b;
+    color: #00ff88;
+    border: 1px solid #334155;
+    border-radius: 3px;
+    cursor: pointer;
+    font-size: 11px;
+    font-family: Consolas, monospace;
+}
+.bottom-buttons button:active { background: #3b4a6b; }
+
+/* --- Специальные кнопки --- */
+.side-buttons button.btn-start,
+.bottom-buttons button.btn-start {
+    background: #0f7a38;
+    color: white;
+    border: 1px solid #14a34b;
+    box-shadow: 0 0 10px rgba(0,255,120,0.3);
+}
+.side-buttons button.btn-start:active,
+.bottom-buttons button.btn-start:active {
+    background: #0b5e2b;
+}
+.side-buttons button.btn-stop,
+.bottom-buttons button.btn-stop {
+    background: #a51d1d;
+    color: white;
+    border: 1px solid #d22b2b;
+    box-shadow: 0 0 10px rgba(255,0,0,0.3);
+}
+.side-buttons button.btn-stop:active,
+.bottom-buttons button.btn-stop:active {
+    background: #7f1515;
+}
+
+/* --- Страницы --- */
+.page { display: none; flex: 1; }
+.page.active { display: flex; }
+
+/* --- Скрытие скролл-бара xterm --- */
+.xterm-viewport {
+    overflow: hidden !important;
+    scrollbar-width: none !important;
+    -ms-overflow-style: none;
+}
+.xterm-viewport::-webkit-scrollbar {
+    display: none !important;
+    width: 0 !important;
+    height: 0 !important;
+}
+.xterm-screen { padding: 0 !important; }
+
+/* ============================================================ */
+/* === ВКЛАДКА ЗАГРУЗОК (УВЕЛИЧЕННАЯ И АДАПТИВНАЯ) === */
+/* ============================================================ */
+.download-panel {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    padding: 16px 20px;
+    gap: 16px;
+    background: #0f172a;
+    overflow-y: auto;
+}
+.download-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    align-items: center;
+}
+.download-row label {
+    color: #94a3b8;
+    font-size: 18px;
+    font-weight: bold;
+    min-width: 140px;
+}
+.download-row .value {
+    font-size: 24px;
+    font-weight: bold;
+    color: #00ff88;
+}
+.download-actions {
+    display: flex;
+    gap: 16px;
+    flex-wrap: wrap;
+    margin: 4px 0;
+}
+.download-actions button {
+    padding: 14px 32px;
+    border: none;
+    border-radius: 6px;
+    cursor: pointer;
+    font-family: Consolas, monospace;
+    font-size: 18px;
+    font-weight: bold;
+}
+.btn-start-download {
+    background: #0f7a38;
+    color: white;
+    border: 1px solid #14a34b;
+    box-shadow: 0 0 16px rgba(0,255,120,0.35);
+}
+.btn-start-download:disabled {
+    background: #555;
+    border-color: #555;
+    box-shadow: none;
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+.btn-stop-download {
+    background: #a51d1d;
+    color: white;
+    border: 1px solid #d22b2b;
+    box-shadow: 0 0 16px rgba(255,0,0,0.35);
+}
+.btn-stop-download:disabled {
+    background: #555;
+    border-color: #555;
+    box-shadow: none;
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+.progress-container {
+    width: 100%;
+    background: #1e293b;
+    border-radius: 10px;
+    height: 36px;
+    overflow: hidden;
+    position: relative;
+    margin: 4px 0;
+}
+.progress-bar {
+    height: 100%;
+    background: #00ff88;
+    width: 0%;
+    transition: width 0.3s ease;
+}
+.progress-text {
+    position: absolute;
+    width: 100%;
+    text-align: center;
+    line-height: 36px;
+    color: #00ff88;
+    font-weight: bold;
+    font-size: 16px;
+    text-shadow: 0 0 8px rgba(0,255,136,0.3);
+}
+.download-info {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 4px 20px;
+    padding: 8px 4px;
+    font-size: 16px;
+    background: #0b0f14;
+    border-radius: 8px;
+}
+.download-info .label {
+    color: #94a3b8;
+    text-align: right;
+    padding-right: 8px;
+}
+.download-info .value {
+    color: #00ff88;
+    text-align: left;
+    font-weight: bold;
+}
+
+/* ===== АДАПТАЦИЯ ДЛЯ МОБИЛЬНЫХ ===== */
+.mobile-only { display: none !important; }
+
+@media (max-width: 768px) {
+    .side-buttons { display: none !important; }
+    .bottom-buttons {
+        gap: 2px;
+        padding: 2px;
+    }
+    .bottom-buttons button {
+        height: 28px;
+        font-size: 10px;
+    }
+    .mobile-only { display: block !important; }
+    .mobile-placeholder {
+        background: transparent !important;
+        border: none !important;
+        box-shadow: none !important;
+        cursor: default !important;
+        pointer-events: none;
+        height: 28px;
+    }
+    .state-panel { gap: 10px; padding: 2px 4px; }
+    .state-item { font-size: 10px; }
+    .state-led { width: 10px; height: 10px; }
+    .topbar { height: 30px; padding: 0 6px; }
+    .topbar > div:first-child { font-size: 12px; }
+    .tab { height: 28px; font-size: 11px; }
+    #terminal-container { padding: 0; }
+    
+    /* Увеличение на мобильных */
+    .download-panel {
+        padding: 12px 12px;
+        gap: 12px;
+    }
+    .download-row label {
+        font-size: 15px;
+        min-width: 100px;
+    }
+    .download-row .value {
+        font-size: 20px;
+    }
+    .download-actions button {
+        padding: 10px 20px;
+        font-size: 15px;
+        flex: 1;
+        min-width: 100px;
+    }
+    .progress-container {
+        height: 30px;
+    }
+    .progress-text {
+        line-height: 30px;
+        font-size: 14px;
+    }
+    .download-info {
+        font-size: 14px;
+        gap: 2px 12px;
+        padding: 6px 2px;
+    }
+}
+@media (max-width: 480px) {
+    .bottom-buttons button { height: 24px; font-size: 9px; }
+    .mobile-placeholder { height: 24px; }
+    .state-panel { gap: 6px; }
+    .state-item { font-size: 9px; }
+    .state-led { width: 8px; height: 8px; }
+    .topbar { height: 26px; }
+    .topbar > div:first-child { font-size: 10px; }
+    .tab { height: 24px; font-size: 10px; }
+    
+    .download-panel {
+        padding: 8px 8px;
+        gap: 10px;
+    }
+    .download-row label {
+        font-size: 13px;
+        min-width: 80px;
+    }
+    .download-row .value {
+        font-size: 17px;
+    }
+    .download-actions button {
+        padding: 8px 14px;
+        font-size: 13px;
+        min-width: 80px;
+    }
+    .progress-container {
+        height: 26px;
+    }
+    .progress-text {
+        line-height: 26px;
+        font-size: 12px;
+    }
+    .download-info {
+        font-size: 12px;
+        gap: 2px 8px;
+        padding: 4px 2px;
+    }
+}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+    <div>ESP32 TERMINAL</div>
+    <div class="status">
+        <div id="dot" class="dot"></div>
+        <div id="status">Disconnected</div>
+    </div>
+</div>
+
+<div class="tabs">
+    <button class="tab active" onclick="showTab('terminal')">Терминал</button>
+    <button class="tab" onclick="showTab('downloads')">Загрузки</button>
+</div>
+
+<!-- Страница терминала -->
+<div id="terminal-page" class="page active">
+    <div class="terminal-layout">
+        <div class="side-buttons">
+            <button onclick="sendKey('f1')">F1</button>
+            <button onclick="sendKey('f2')">F2</button>
+            <button onclick="sendKey('f3')">F3</button>
+        </div>
+
+        <div class="center-panel">
+            <div class="state-panel">
+                <div class="state-item">
+                    <div id="led-stop" class="state-led"></div>
+                    <span>СТОП</span>
+                </div>
+                <div class="state-item">
+                    <div id="led-wait" class="state-led"></div>
+                    <span>ОЖИДАНИЕ</span>
+                </div>
+                <div class="state-item">
+                    <div id="led-run" class="state-led"></div>
+                    <span>РАБОТА</span>
+                </div>
+            </div>
+
+            <div id="terminal-container"></div>
+
+            <div class="bottom-buttons">
+                <button class="btn-start mobile-only" onclick="sendKey('start')">START</button>
+                <div class="mobile-only mobile-placeholder"></div>
+                <button class="btn-stop mobile-only" onclick="sendKey('stop')">STOP</button>
+                <button class="mobile-only" onclick="sendKey('f1')">F1</button>
+                <button class="mobile-only" onclick="sendKey('f2')">F2</button>
+                <button class="mobile-only" onclick="sendKey('f3')">F3</button>
+
+                <button onclick="sendKey('enter')">ENTER</button>
+                <button onclick="sendKey('up')">▲</button>
+                <button onclick="sendKey('esc')">ESC</button>
+                <button onclick="sendKey('left')">◄</button>
+                <button onclick="sendKey('down')">▼</button>
+                <button onclick="sendKey('right')">►</button>
+            </div>
+        </div>
+
+        <div class="side-buttons">
+            <button class="btn-start" onclick="sendKey('start')">START</button>
+            <button class="btn-stop" onclick="sendKey('stop')">STOP</button>
+        </div>
+    </div>
+</div>
+
+<!-- Страница загрузок (увеличенная) -->
+<div id="downloads-page" class="page">
+    <div class="download-panel">
+        <div class="download-row">
+            <label>Размер архива:</label>
+            <span id="archive-size" class="value">—</span>
+        </div>
+
+        <div class="download-actions">
+            <button id="btn-download" class="btn-start-download" onclick="startDownload()">Скачать архив</button>
+            <button id="btn-stop" class="btn-stop-download" onclick="stopDownload()" disabled>Остановить</button>
+        </div>
+
+        <div class="progress-container">
+            <div id="progress-bar" class="progress-bar" style="width:0%;"></div>
+            <div id="progress-text" class="progress-text">0%</div>
+        </div>
+
+        <div class="download-info">
+            <span class="label">Получено:</span>
+            <span class="value" id="received-bytes">0 байт</span>
+            <span class="label">Всего:</span>
+            <span class="value" id="total-bytes">0 байт</span>
+            <span class="label">Осталось:</span>
+            <span class="value" id="eta">—</span>
+            <span class="label">Прошло:</span>
+            <span class="value" id="elapsed">00:00</span>
+            <span class="label">Скорость:</span>
+            <span class="value" id="speed">0 байт/с</span>
+        </div>
+    </div>
+</div>
+
+<script>
+// ---------- ОСНОВНЫЕ ПЕРЕМЕННЫЕ ----------
+let termCols = 80;
+let termRows = 24;
+const term = new Terminal({
+    cursorBlink: true,
+    cols: termCols,
+    rows: termRows,
+    convertEol: false,
+    scrollback: 0,
+    disableStdin: false
+});
+
+const container = document.getElementById('terminal-container');
+term.open(container);
+let pingTimer = null;
+let ws = null;
+let terminalActive = true;
+
+// ---------- ПЕРЕМЕННЫЕ ДЛЯ ЗАГРУЗОК ----------
+let archiveSize = 0;
+let totalReceived = 0;
+let downloadInProgress = false;
+let startTime = null;
+let downloadInterval = null;
+let archiveSizeTimer = null;
+let fileName = '';
+let lastDownloadUrl = null;
+let progressRaf = null;
+
+const archiveSizeSpan   = document.getElementById("archive-size");
+const btnDownload       = document.getElementById("btn-download");
+const btnStop           = document.getElementById("btn-stop");
+const progressBar       = document.getElementById("progress-bar");
+const progressText      = document.getElementById("progress-text");
+const receivedBytesSpan = document.getElementById("received-bytes");
+const totalBytesSpan    = document.getElementById("total-bytes");
+const speedSpan         = document.getElementById("speed");
+const elapsedSpan       = document.getElementById("elapsed");
+const etaSpan           = document.getElementById("eta");
+
+// ---------- RESIZE (без отступов) ----------
+function resizeTerminal() {
+    const rect = container.getBoundingClientRect();
+    const availWidth  = rect.width;
+    const availHeight = rect.height;
+    const fontByWidth = availWidth / (termCols * 0.62);
+    const fontByHeight = availHeight / (termRows * 1.25);
+    const fontSize = Math.floor(Math.min(fontByWidth, fontByHeight));
+    term.options.fontSize = Math.max(8, Math.min(fontSize, 40));
+    term.refresh(0, termRows - 1);
+}
+
+// ---------- ФУНКЦИИ ДЛЯ ЗАГРУЗОК ----------
+function formatTime(ms) {
+    if (ms < 0) ms = 0;
+    const totalSec = Math.floor(ms / 1000);
+    const min = String(Math.floor(totalSec / 60)).padStart(2, "0");
+    const sec = String(totalSec % 60).padStart(2, "0");
+    return min + ":" + sec;
+}
+
+function updateProgress(received) {
+    const percent = archiveSize > 0 ? (received / archiveSize * 100) : 0;
+    progressBar.style.width = Math.min(percent, 100) + '%';
+    progressText.innerText  = Math.round(Math.min(percent, 100)) + '%';
+    receivedBytesSpan.innerText = received;
+
+    if (downloadInProgress && received > 0) {
+        const elapsed    = Date.now() - startTime;
+        const elapsedSec = elapsed / 1000;
+        const speed      = received / elapsedSec;
+        speedSpan.innerText   = Math.round(speed) + " байт/с";
+        elapsedSpan.innerText = formatTime(elapsed);
+        if (speed > 0 && archiveSize > received) {
+            const remaining = (archiveSize - received) / speed;
+            etaSpan.innerText = formatTime(remaining * 1000);
+        } else {
+            etaSpan.innerText = '—';
+        }
+    } else {
+        speedSpan.innerText = "0 байт/с";
+        etaSpan.innerText   = "—";
+    }
+}
+
+function scheduleProgressUpdate(received, total) {
+    if (total) archiveSize = total;
+    if (progressRaf) return;
+    progressRaf = requestAnimationFrame(() => {
+        progressRaf = null;
+        totalReceived = received;
+        updateProgress(totalReceived);
+    });
+}
+
+async function triggerBrowserDownload(url, filename) {
+    try {
+        const res = await fetch(url, { cache: "no-store" });
+        if (!res.ok) throw new Error("HTTP " + res.status);
+        const total   = parseInt(res.headers.get("Content-Length") || "0", 10);
+        const reader  = res.body.getReader();
+        const chunks  = [];
+        let received  = 0;
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            chunks.push(value);
+            received += value.byteLength;
+            scheduleProgressUpdate(received, total || archiveSize);
+        }
+        const blob  = new Blob(chunks);
+        const objUrl= URL.createObjectURL(blob);
+        const a     = document.createElement("a");
+        a.href = objUrl;
+        a.download = filename || "archive.bin";
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(objUrl), 2000);
+        lastDownloadUrl = url;
+    } catch (e) {
+        if (terminalActive) term.writeln("\x1b[31mНе удалось скачать файл: " + e.message + "\x1b[0m");
+        console.error("Download error:", e);
+    }
+}
+
+function requestArchiveSize() {
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+        archiveSizeSpan.innerText = "Нет соединения";
+        return;
+    }
+    ws.send(JSON.stringify({ action: "getArchiveSize" }));
+}
+
+function startArchiveSizePolling() {
+    if (!archiveSizeTimer && document.getElementById("downloads-page").classList.contains("active") && !downloadInProgress) {
+        requestArchiveSize();
+        archiveSizeTimer = setInterval(requestArchiveSize, 5000);
+    }
+}
+
+function stopArchiveSizePolling() {
+    if (archiveSizeTimer) { clearInterval(archiveSizeTimer); archiveSizeTimer = null; }
+}
+
+function startDownload() {
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+        if (terminalActive) term.writeln("\x1b[31mНет соединения с сервером\x1b[0m");
+        return;
+    }
+    if (downloadInProgress) return;
+    if (archiveSize <= 0) {
+        if (terminalActive) term.writeln("\x1b[33mРазмер архива неизвестен. Подождите обновления.\x1b[0m");
+        return;
+    }
+    stopArchiveSizePolling();
+    totalReceived     = 0;
+    downloadInProgress= true;
+    startTime         = Date.now();
+    fileName          = '';
+    btnDownload.disabled = true;
+    btnStop.disabled     = false;
+    updateProgress(0);
+
+    ws.send(JSON.stringify({ action: "startDownload" }));
+
+    if (downloadInterval) clearInterval(downloadInterval);
+    downloadInterval = setInterval(() => {
+        if (downloadInProgress) {
+            elapsedSpan.innerText = formatTime(Date.now() - startTime);
+        } else {
+            clearInterval(downloadInterval);
+        }
+    }, 1000);
+}
+
+function stopDownload() {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    if (!downloadInProgress) return;
+    ws.send(JSON.stringify({ action: "stopDownload" }));
+    if (terminalActive) term.writeln("\x1b[33mОстановка запрошена\x1b[0m");
+}
+
+// ---------- ПАРСИНГ СПЕЦПОСЛЕДОВАТЕЛЬНОСТЕЙ ----------
+function parseTerminalSize(text) {
+    const match = text.match(/\x1B\[8;(\d+);(\d+)t/);
+    if (!match) return;
+    const newRows = parseInt(match[2]);
+    const newCols = parseInt(match[1]);
+    if (newRows !== termRows || newCols !== termCols) {
+        termRows = newRows;
+        termCols = newCols;
+        term.resize(termCols, termRows);
+        setTimeout(resizeTerminal, 0);
+    }
+}
+
+function parseLampState(text) {
+    const match = text.match(/\x1B\[(\d+)q/);
+    if (!match) return;
+    const state = parseInt(match[1]);
+    document.getElementById("led-stop").classList.toggle("active-stop", (state & 0x01) !== 0);
+    document.getElementById("led-wait").classList.toggle("active-wait", (state & 0x02) !== 0);
+    document.getElementById("led-run").classList.toggle("active-run", (state & 0x04) !== 0);
+}
+
+// ---------- ОТПРАВКА КОМАНД ----------
+function sendKey(key) {
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+        term.writeln('\r\n[Не подключено]');
+        return;
+    }
+    ws.send(key);
+}
+
+// ---------- ПЕРЕКЛЮЧЕНИЕ ВКЛАДОК ----------
+function showTab(name) {
+    document.querySelectorAll(".page").forEach(x => x.classList.remove("active"));
+    document.querySelectorAll(".tab").forEach(x => x.classList.remove("active"));
+
+    if (name === "terminal") {
+        document.getElementById("terminal-page").classList.add("active");
+        document.querySelectorAll(".tab")[0].classList.add("active");
+        terminalActive = true;
+        resizeTerminal();
+        stopArchiveSizePolling();
+    } else {
+        document.getElementById("downloads-page").classList.add("active");
+        document.querySelectorAll(".tab")[1].classList.add("active");
+        terminalActive = false;
+        startArchiveSizePolling();
+    }
+}
+
+// ---------- WEBSOCKET ----------
+function connectWebSocket() {
+    ws = new WebSocket(`ws://${location.host}/ws`);
+    ws.binaryType = "arraybuffer";
+
+    ws.onopen = () => {
+        pingTimer = setInterval(() => {
+            if (ws.readyState === WebSocket.OPEN) ws.send("ping");
+        }, 5000);
+        document.getElementById("dot").classList.add("connected");
+        document.getElementById("status").innerText = "Connected";
+        requestArchiveSize();
+        const now = new Date();
+        const timeMsg = JSON.stringify({
+            action: "setTime",
+            year: now.getFullYear(),
+            month: now.getMonth() + 1,
+            day: now.getDate(),
+            hour: now.getHours(),
+            minute: now.getMinutes(),
+            second: now.getSeconds()
+        });
+        ws.send(timeMsg);
+    };
+
+    ws.onclose = () => {
+        clearInterval(pingTimer);
+        document.getElementById("dot").classList.remove("connected");
+        document.getElementById("status").innerText = "Disconnected";
+        setTimeout(connectWebSocket, 3000);
+    };
+
+    ws.onerror = (err) => {
+        console.error('WS error:', err);
+    };
+
+    ws.onmessage = (event) => {
+        if (event.data instanceof ArrayBuffer) {
+            const bytes = new Uint8Array(event.data);
+            const filtered = bytes.map(b => {
+                if (b === 0x81) return 0x76;
+                if (b === 0x7F) return 0x30;
+                if (b === 0x80) return 0x5E;
+                return b;
+            }).filter(b => b !== 0x00);
+
+            const decoder = new TextDecoder("windows-1251");
+            let text = decoder.decode(filtered);
+
+            parseTerminalSize(text);
+            parseLampState(text);
+
+            text = text.replace(/\x00/g, '');
+            text = text.replace(/\x1B\[\d+;\d+H/g, '');
+
+            term.write('\x1b[2J\x1b[H');
+            term.write(text);
+            return;
+        }
+
+        if (typeof event.data === 'string') {
+            let msg;
+            try {
+                msg = JSON.parse(event.data);
+            } catch (e) {
+                if (terminalActive) {
+                    term.writeln('\x1b[31m' + event.data + '\x1b[0m');
+                }
+                console.log('Non-JSON string:', event.data);
+                return;
+            }
+
+            if (msg.type === "log") {
+                console.log("[LOG]", msg.msg);
+                return;
+            }
+            if (msg.type === "archiveSize") {
+                archiveSize = msg.size;
+                archiveSizeSpan.innerText = archiveSize + " байт";
+                totalBytesSpan.innerText  = archiveSize;
+                if (!downloadInProgress) updateProgress(0);
+                return;
+            }
+            if (msg.type === "fileName") {
+                fileName = msg.name || '';
+                return;
+            }
+            if (msg.type === "progress") {
+                scheduleProgressUpdate(msg.received, msg.total);
+                return;
+            }
+            if (msg.type === "downloadComplete") {
+                downloadInProgress = false;
+                clearInterval(downloadInterval);
+                btnDownload.disabled = false;
+                btnStop.disabled     = true;
+                updateProgress(msg.total || archiveSize);
+                triggerBrowserDownload(msg.url || '/download', msg.fileName || fileName || 'archive.bin');
+                startArchiveSizePolling();
+                return;
+            }
+            if (msg.type === "downloadStopped") {
+                downloadInProgress = false;
+                clearInterval(downloadInterval);
+                btnDownload.disabled = false;
+                btnStop.disabled     = true;
+                updateProgress(msg.received || totalReceived);
+                // если есть что скачать
+                if (msg.url) {
+                    const a = document.createElement("a");
+                    a.href = msg.url;
+                    a.download = msg.fileName || "archive_part.bin";
+                    document.body.appendChild(a);
+                    a.click();
+                    a.remove();
+                    console.log("Скачана неполная версия архива.");
+                }
+                startArchiveSizePolling();
+                return;
+            }
+            if (msg.type === "error") {
+                downloadInProgress = false;
+                clearInterval(downloadInterval);
+                btnDownload.disabled = false;
+                btnStop.disabled     = true;
+                const errMsg = "Ошибка: " + (msg.msg || '');
+                if (terminalActive) term.writeln("\x1b[31m" + errMsg + "\x1b[0m");
+                console.error(errMsg);
+                return;
+            }
+            console.error('Unknown JSON:', msg);
+        }
+    };
+}
+
+// ---------- КЛАВИАТУРА ----------
+document.addEventListener("keydown", e => {
+    if (!terminalActive) return;
+    switch (e.key) {
+        case "1": sendKey("f1"); break;
+        case "2": sendKey("f2"); break;
+        case "3": sendKey("f3"); break;
+        case "Escape": sendKey("esc"); break;
+        case "Enter": sendKey("enter"); break;
+        case "q": case "Q": sendKey("esc"); break;
+        case "e": case "E": sendKey("enter"); break;
+        case "w": case "W": case "ArrowUp": sendKey("up"); break;
+        case "s": case "S": case "ArrowDown": sendKey("down"); break;
+        case "a": case "A": case "ArrowLeft": sendKey("left"); break;
+        case "d": case "D": case "ArrowRight": sendKey("right"); break;
+        case "5": sendKey("start"); break;
+        case "6": sendKey("stop"); break;
+    }
+});
+
+// ---------- ЗАПУСК ----------
+connectWebSocket();
+window.addEventListener('resize', resizeTerminal);
+window.addEventListener('beforeunload', function() {
+    if (ws && ws.readyState === WebSocket.OPEN && downloadInProgress) {
+        ws.send(JSON.stringify({ action: "stopDownload" }));
+    }
+});
+const ro = new ResizeObserver(resizeTerminal);
+ro.observe(container);
+setTimeout(resizeTerminal, 100);
+</script>
+</body>
+</html>

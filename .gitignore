@@ -1,0 +1,28 @@
+# Папки сборки (ОБЯЗАТЕЛЬНО!)
+build/
+bootloader/
+
+# Node.js модули (ОБЯЗАТЕЛЬНО!)
+node_modules/
+components/*/html/node_modules/
+
+# Конфигурации ESP-IDF
+sdkconfig
+sdkconfig.old
+sdkconfig.h
+
+# Настройки VS Code
+.vscode/
+
+# Временные файлы
+*.log
+*.tmp
+*.swp
+*.swo
+*.bin
+*.elf
+*.map
+
+# Системные файлы
+.DS_Store
+Thumbs.db
