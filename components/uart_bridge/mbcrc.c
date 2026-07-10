@@ -69,6 +69,12 @@ static const uint8_t aucCRCLo[] = {0x00, 0xC0, 0xC1, 0x01, 0xC3, 0x03, 0x02, 0xC
                                    0x44, 0x84, 0x85, 0x45, 0x87, 0x47, 0x46, 0x86, 0x82, 0x42, 0x43, 0x83, 0x41, 0x81, 0x80,
                                    0x40};
 
+/**
+ * @brief Вычисление CRC16 Modbus
+ * @param pucFrame указатель на данные
+ * @param usLen    длина данных
+ * @return 16-битное CRC
+ */
 uint16_t mbcrc_calculate(uint8_t *pucFrame, uint16_t usLen)
 {
     uint8_t ucCRCHi = 0xFF;
@@ -84,6 +90,12 @@ uint16_t mbcrc_calculate(uint8_t *pucFrame, uint16_t usLen)
     return (uint16_t)(ucCRCHi << 8 | ucCRCLo);
 }
 
+/**
+ * @brief Проверка CRC в конце пакета
+ * @param buf указатель на пакет
+ * @param len общая длина пакета (включая 2 байта CRC)
+ * @return 1 если CRC совпадает, иначе 0
+ */
 uint8_t mbcrc_is_valid(uint8_t *buf, uint16_t len)
 {
     uint16_t actual_crc = ((uint16_t)buf[len - 1] << 8) | buf[len - 2];
@@ -91,6 +103,11 @@ uint8_t mbcrc_is_valid(uint8_t *buf, uint16_t len)
     return actual_crc == calculated_crc;
 }
 
+/**
+ * @brief Вставка CRC в конец буфера (записывает 2 байта после len)
+ * @param buf буфер с данными
+ * @param len длина данных (без CRC)
+ */
 void mbcrc_insert_crc(uint8_t *buf, uint16_t len)
 {
     uint16_t crc = mbcrc_calculate(buf, len);
@@ -98,6 +115,9 @@ void mbcrc_insert_crc(uint8_t *buf, uint16_t len)
     buf[len + 1] = (uint8_t)(crc >> 8);
 }
 
+/**
+ * @brief Альтернативная реализация CRC16
+ */
 uint16_t modbus_crc16(
     const uint8_t *buf,
     uint16_t len

@@ -12,6 +12,9 @@
 
 static SemaphoreHandle_t uart_mutex = NULL;
 
+/**
+ * @brief Инициализация UART для обмена с Modbus-устройством
+ */
 void uart_bridge_init(void)
 {
     uart_config_t uart_config = {
@@ -69,6 +72,12 @@ void uart_bridge_init(void)
     }
 }
 
+/**
+ * @brief Отправка данных через UART
+ * @param data указатель на данные
+ * @param len  длина в байтах
+ * @return количество отправленных байт или -1 при ошибке
+ */
 int uart_bridge_send(
     const uint8_t *data,
     size_t len
@@ -96,6 +105,13 @@ int uart_bridge_send(
     return ret;
 }
 
+/**
+ * @brief Приём данных из UART с таймаутом
+ * @param data      буфер для приёма
+ * @param max_len   максимальное количество байт
+ * @param timeout_ms таймаут в миллисекундах
+ * @return количество принятых байт или -1 при ошибке/таймауте
+ */
 int uart_bridge_receive(
     uint8_t *data,
     size_t max_len,

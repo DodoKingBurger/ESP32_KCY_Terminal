@@ -14,7 +14,14 @@ static const char *TAG = "MODBUS_POLL";
 BUILD REQUEST
 ====================================================
 */
-
+/**
+ * @brief Формирует Modbus-запрос для чтения регистров (функции 0x03, 0x04 и др.)
+ * @param slave     адрес ведомого
+ * @param function  код функции Modbus
+ * @param reg       начальный адрес регистра
+ * @param count     количество регистров
+ * @param req       указатель на буфер для запроса (минимум 8 байт)
+ */
 static void build_request(
     uint8_t slave,
     uint8_t function,
@@ -41,7 +48,14 @@ static void build_request(
 EXECUTE REQUEST
 ====================================================
 */
-
+/**
+ * @brief Отправляет запрос, получает ответ и проверяет CRC
+ * @param request      буфер с запросом
+ * @param request_len  длина запроса
+ * @param response     буфер для ответа
+ * @param response_len указатель для сохранения длины ответа
+ * @return MODBUS_OK при успехе, иначе код ошибки
+ */
 static modbus_status_t execute_request(
     uint8_t *request,
     uint16_t request_len,
@@ -110,7 +124,9 @@ static modbus_status_t execute_request(
 READ HOLDING
 ====================================================
 */
-
+/**
+ * @brief Чтение holding-регистров (функция 0x03)
+ */
 modbus_status_t modbus_read_holding(
     uint8_t slave,
     uint16_t reg,
@@ -142,7 +158,9 @@ modbus_status_t modbus_read_holding(
 READ INPUT
 ====================================================
 */
-
+/**
+ * @brief Чтение input-регистров (функция 0x04)
+ */
 modbus_status_t modbus_read_input(
     uint8_t slave,
     uint16_t reg,
@@ -175,7 +193,14 @@ HELPERS
 ====================================================
 */
 
-// Читает несколько регистров за один запрос
+/**
+ * @brief Чтение нескольких регистров с распаковкой в массив uint16_t
+ * @param slave      адрес ведомого
+ * @param start_reg  начальный адрес
+ * @param count      количество регистров
+ * @param values     массив для сохранения значений (должен быть размером count)
+ * @return MODBUS_OK при успехе
+ */
 modbus_status_t modbus_read_registers(
     uint8_t slave,
     uint16_t start_reg,
@@ -200,46 +225,9 @@ modbus_status_t modbus_read_registers(
     return MODBUS_OK;
 }
 
-
-uint16_t read_reg(uint16_t reg)
-{
-    uint8_t response[32];
-    uint16_t response_len = 0;
-
-    modbus_status_t status =
-        modbus_read_input(
-            1,          // slave id
-            reg,
-            1,
-            response,
-            &response_len
-        );
-
-    if (status != MODBUS_OK)
-    {
-        ESP_LOGE(TAG,
-            "Read fail reg=0x%04X",
-            reg
-        );
-
-        return 0;
-    }
-
-    /*
-    Ответ Modbus:
-
-    [0] slave
-    [1] func
-    [2] byte count
-    [3] data hi
-    [4] data lo
-    [5] crc lo
-    [6] crc hi
-    */
-
-    return (response[3] << 8) | response[4];
-}
-
+/**
+ * @brief Запись одного регистра (функция 0x06)
+ */
 modbus_status_t modbus_write_single_register(
     uint8_t slave,
     uint16_t reg,
@@ -279,7 +267,13 @@ Offset 0
 Size 2000
 ========================================================
 */
-
+/**
+ * @brief Чтение экрана терминала через функцию 0x64 (файл 11, размер 2000)
+ * @param slave_id   адрес ведомого
+ * @param screen     буфер для принятых данных (ANSI-текст)
+ * @param screen_len указатель для сохранения длины полученных данных
+ * @return true при успехе
+ */
 bool terminal_read_screen(
     uint8_t slave_id,
     uint8_t *screen,
@@ -408,7 +402,12 @@ SEND COMMAND
 Function 0x65
 ========================================================
 */
-
+/**
+ * @brief Отправка команды клавиши в терминал через функцию 0x65 (запись в файл 11)
+ * @param slave_id  адрес ведомого
+ * @param key_code  строка с escape-последовательностью (например, "\x1b[A")
+ * @return true при успехе
+ */
 bool terminal_send_command(uint8_t slave_id,  const char *key_code) {
     uint16_t data_len = strlen(key_code);
     if (data_len == 0 || data_len > 252) {
@@ -484,6 +483,11 @@ bool terminal_send_command(uint8_t slave_id,  const char *key_code) {
     return true;
 }
 
+/**
+ * @brief Преобразует символьное имя клавиши (f1, up, enter) в escape-последовательность
+ * @param cmd  строка-идентификатор (f1, up, enter и т.д.)
+ * @return указатель на константную строку с escape-последовательностью или NULL
+ */
 const char*  get_key_code(const char *cmd)
 {
     if (strcmp(cmd, "f1") == 0)      return "\x1b[11~";
@@ -500,10 +504,16 @@ const char*  get_key_code(const char *cmd)
     return NULL;
 }
 
-// ==========================================================
-// Чтение файла через функцию 0x64 (чтение произвольного участка)
-// Возвращает: MODBUS_OK, если данные получены (out_len может быть 0 - конец файла)
-// ==========================================================
+/**
+ * @brief Чтение файла через функцию 0x64 (произвольное чтение)
+ * @param slave    адрес ведомого
+ * @param offset   смещение в байтах
+ * @param size     запрашиваемое количество байт (не более 4096)
+ * @param timeout  таймаут в мс
+ * @param out      буфер для данных
+ * @param out_len  указатель для сохранения фактической длины
+ * @return MODBUS_OK при успехе, при ошибке 0x03 (конец файла) возвращает MODBUS_OK с out_len=0
+ */
 modbus_status_t modbus_read_file_0x64(uint8_t slave, uint32_t offset, 
     uint32_t size,uint32_t timeout, uint8_t *out, uint16_t *out_len)
 {
@@ -592,12 +602,15 @@ modbus_status_t modbus_read_file_0x64(uint8_t slave, uint32_t offset,
 }
 
 
-// ==========================================================
-// Чтение файла через функцию 0x14 (Read File Record)
-// Запрос: slave, 0x14, byte_count=0x07, ref_type=0x06, file_id(2), record_number(2), record_length=0x64(2)
-// Ответ: slave, 0x14, byte_count, data_len, ref_type=0x06, данные (N), CRC
-// Признак конца файла: byte_count=0x02, data_len=0x01, ref_type=0x06 (без данных)
-// ==========================================================
+/**
+ * @brief Чтение файла через функцию 0x14 (Read File Record)
+ * @param slave          адрес ведомого
+ * @param file_id        идентификатор файла (1..)
+ * @param record_number  номер записи (0..)
+ * @param out            буфер для данных (максимум 200 байт)
+ * @param out_len        указатель для сохранения длины данных
+ * @return MODBUS_OK при успехе, при конце файла возвращает MODBUS_OK с out_len=0
+ */
 modbus_status_t modbus_read_file_0x14(uint8_t slave, uint16_t file_id, uint16_t record_number, uint8_t *out, uint16_t *out_len)
 {
     // Запрос всегда на 100 регистров (200 байт) – фиксировано
@@ -683,9 +696,12 @@ modbus_status_t modbus_read_file_0x14(uint8_t slave, uint16_t file_id, uint16_t 
     return MODBUS_OK;
 }
 
-// ==========================================================
-// Получение размера архива (регистры 0x8FA, 0x8FB)
-// ==========================================================
+/**
+ * @brief Получение размера архива (регистры 0x8FA, 0x8FB)
+ * @param slave адрес ведомого
+ * @param size  указатель для сохранения размера в байтах
+ * @return true при успехе
+ */
 bool modbus_read_archive_size(uint8_t slave, uint32_t *size) {
     uint16_t regs[2];
     modbus_status_t status = modbus_read_registers(slave, 0x08FA, 2, regs);

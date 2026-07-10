@@ -2,6 +2,13 @@
 
 #include <string.h>
 
+/**
+ * @brief Преобразование двух байт (big-endian) в float с масштабированием
+ * @param buf    буфер
+ * @param offset смещение в байтах
+ * @param scale  коэффициент масштабирования
+ * @return float = (uint16_t) * scale
+ */
 float parser_u16(
     const uint8_t *buf,
     uint16_t offset,
@@ -15,6 +22,12 @@ float parser_u16(
     return raw * scale;
 }
 
+/**
+ * @brief Преобразование 4 байт (ABCD) в float (IEEE 754)
+ * @param buf    буфер
+ * @param offset смещение
+ * @return float
+ */
 float parser_float_abcd(
     const uint8_t *buf,
     uint16_t offset
@@ -37,11 +50,13 @@ float parser_float_abcd(
     return value;
 }
 
-/*
- * CDAB
- * very common in Modbus devices
- */
 
+/**
+ * @brief Преобразование 4 байт (CDAB) в float (порядок байт, часто встречается в Modbus)
+ * @param buf    буфер
+ * @param offset смещение
+ * @return float
+ */
 float parser_float_cdab(
     const uint8_t *buf,
     uint16_t offset

@@ -12,6 +12,9 @@
 #define AP_SSID "ESP32-Portal"
 #define AP_PASS "12345678"
 
+/**
+ * @brief Обработчик событий Wi-Fi (подключение/отключение клиента)
+ */
 static void wifi_event_handler(void *arg, esp_event_base_t event_base,
                                int32_t event_id, void *event_data)
 {
@@ -28,6 +31,9 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
     }
 }
 
+/**
+ * @brief Запуск точки доступа с настройками IP 192.168.4.1 и DNS-перехватом
+ */
 void wifi_manager_start(void)
 {
     // Инициализация сетевого интерфейса и цикла событий (уже сделано в main, но для надёжности)

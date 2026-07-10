@@ -13,4 +13,5 @@
         esp_event
         log
         uart_bridge
+        archive_manager
 )

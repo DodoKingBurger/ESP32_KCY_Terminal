@@ -4,6 +4,8 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+#include "archive_manager.h"  // <-- ДОБАВИТЬ
+
 #include "esp_log.h"
 
 #include <stdio.h>
@@ -30,111 +32,6 @@
 static const char *TAG = "MODBUS_POLL";
 
 extern bool download_in_progress;
-
-void _modbus_poll_task(void *arg)
-{
-    uint8_t response[256];
-
-    uint16_t response_len;
-
-    while (1)
-    {
-        modbus_status_t status =
-            modbus_read_input(
-                1,          // slave id
-                0x00FA,     // start register
-                3,          // count
-                response,
-                &response_len
-            );
-
-        if (status == MODBUS_OK)
-        {
-            /*
-            Проверяем количество байт
-
-            response[2] должно быть:
-            3 регистра * 2 байта = 6
-            */
-
-            if (response[2] != 6)
-            {
-                ESP_LOGW(TAG, "Invalid byte count");
-
-                vTaskDelay(pdMS_TO_TICKS(1000));
-
-                continue;
-            }
-
-            /*
-            REG FA
-            */
-
-            uint8_t month =
-                response[3];
-
-            uint8_t day =
-                response[4];
-
-            /*
-            REG FB
-            */
-
-            uint8_t hour =
-                response[5];
-
-            uint8_t year =
-                response[6];
-
-            /*
-            REG FC
-            */
-
-            uint8_t seconds =
-                response[7];
-
-            uint8_t minutes =
-                response[8];
-
-            char json[128];
-
-            snprintf(
-                json,
-                sizeof(json),
-                "{"
-                "\"time\":\"%02d:%02d:%02d\","
-                "\"date\":\"%02d.%02d.%02d\""
-                "}",
-                hour,
-                minutes,
-                seconds,
-                day,
-                month,
-                year
-            );
-
-            ESP_LOGI(TAG, "%s", json);
-
-            web_server_send(json);
-        }
-        else
-        {
-            ESP_LOGW(
-                TAG,
-                "Modbus error: %d",
-                status
-            );
-        }
-
-        vTaskDelay(pdMS_TO_TICKS(500));
-    }
-}
-
-/*
-====================================================
-START REASONS
-====================================================
-*/
 
 static const char *get_start_reason(uint8_t code)
 {
@@ -317,12 +214,13 @@ static const char *get_stop_reason(uint16_t code)
     }
 }
 
-/*
-====================================================
-MODBUS POLL TASK
-====================================================
-*/
 
+/**
+ * @brief Основная задача опроса Modbus для телеметрии
+ * @param arg не используется
+ * @details Выполняет чтение времени (0xFA-0xFC), состояния (0xFF) и параметров (0x101-0x110),
+ *          формирует JSON и отправляет через web_server_send().
+ */
 void modbus_poll_task(void *arg) {
     uint16_t time_regs[3];   // 0x00FA, 0x00FB, 0x00FC
     uint16_t status;          // 0x00FF
@@ -462,6 +360,11 @@ void modbus_poll_task(void *arg) {
     }
 }
 
+/**
+ * @brief Задача чтения экрана терминала и отправки через WebSocket
+ * @param arg не используется
+ * @details Пропускает итерации, если идёт загрузка архива (download_in_progress).
+ */
 static void terminal_task(void *arg)
 {
     uint8_t screen[4096];
@@ -498,6 +401,9 @@ static void terminal_task(void *arg)
     }
 }
 
+/**
+ * @brief Запускает задачу terminal_task
+ */
 void terminal_task_start(void)
 {
     xTaskCreate(
