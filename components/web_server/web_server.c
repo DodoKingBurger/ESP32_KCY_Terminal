@@ -70,6 +70,30 @@ size_t web_server_get_archive_size(void)
 }
 
 /**
+ * @brief Обработчик GET /style.css – отдаёт встроенный CSS-файл.
+ */
+static esp_err_t style_css_handler(httpd_req_t *req)
+{
+    httpd_resp_set_type(req, "text/css");
+    extern const uint8_t style_css_start[]   asm("_binary_style_css_start");
+    extern const uint8_t style_css_end[]     asm("_binary_style_css_end");
+    return httpd_resp_send(req, (const char *)style_css_start,
+                           style_css_end - style_css_start);
+}
+
+/**
+ * @brief Обработчик GET /script.js – отдаёт встроенный JS-файл.
+ */
+static esp_err_t script_js_handler(httpd_req_t *req)
+{
+    httpd_resp_set_type(req, "application/javascript");
+    extern const uint8_t script_js_start[]   asm("_binary_script_js_start");
+    extern const uint8_t script_js_end[]     asm("_binary_script_js_end");
+    return httpd_resp_send(req, (const char *)script_js_start,
+                           script_js_end - script_js_start);
+}
+
+/**
  * @brief Обработчик HTTP GET для корневого URI (/).
  *        Отдаёт HTML-страницу index.html с кэш-заголовками no-cache.
  * @param req указатель на запрос HTTP
@@ -195,7 +219,11 @@ static esp_err_t ws_handler(httpd_req_t *req)
     if (ret != ESP_OK) { free(frame.payload); return ret; }
     ((char *)frame.payload)[frame.len] = 0;
     const char *cmd = (const char *)frame.payload;
-
+    // Добавь это перед обработкой сообщений
+    if (terminal_owner_fd < 0) {
+        free(frame.payload);
+        return ESP_OK;
+    }
     if (cmd[0] == '{') {
         if (strstr(cmd, "\"action\":\"setTime\"")) {
             int year = 2026, month = 7, day = 6, hour = 13, minute = 51, second = 43;
@@ -329,6 +357,9 @@ void web_server_start(void)
         .method = HTTP_GET, 
         .handler = archive_manager_http_download_handler 
     });
+
+    httpd_register_uri_handler(server, &(httpd_uri_t){ .uri = "/style.css", .method = HTTP_GET, .handler = style_css_handler });
+    httpd_register_uri_handler(server, &(httpd_uri_t){ .uri = "/script.js", .method = HTTP_GET, .handler = script_js_handler });
 
     httpd_register_uri_handler(server, &(httpd_uri_t){ .uri = "/",          .method = HTTP_GET, .handler = root_get_handler });
     httpd_register_uri_handler(server, &(httpd_uri_t){ .uri = "/xterm.js",  .method = HTTP_GET, .handler = xterm_js_handler });

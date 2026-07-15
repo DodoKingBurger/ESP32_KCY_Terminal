@@ -3,6 +3,8 @@
     INCLUDE_DIRS "."
     EMBED_FILES
         "html/index.html"
+        "html/style.css"
+        "html/script.js"
         "html/node_modules/xterm/lib/xterm.js"
         "html/node_modules/xterm/css/xterm.css"
     REQUIRES
