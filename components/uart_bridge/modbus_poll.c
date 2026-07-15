@@ -10,25 +10,6 @@
 
 #include <stdio.h>
 
-#define REG_STATUS          0x00FF
-#define REG_INSULATION      0x0101
-#define REG_UAB             0x0102
-#define REG_UBC             0x0103
-#define REG_UAC             0x0104
-#define REG_IA              0x0105
-#define REG_IB              0x0106
-#define REG_IC              0x0107
-#define REG_COS             0x0108
-#define REG_LOAD            0x0109
-#define REG_UA              0x010A
-#define REG_UB              0x010B
-#define REG_UC              0x010C
-#define REG_FREQ            0x010D
-#define REG_VFD_CURRENT     0x010E
-#define REG_DC_VOLT         0x010F
-#define REG_HEATSINK_TEMP   0x0110
-
-
 static const char *TAG = "MODBUS_POLL";
 
 extern bool download_in_progress;
@@ -58,7 +39,6 @@ static const char *get_start_reason(uint8_t code)
 STOP REASONS
 ====================================================
 */
-
 static const char *get_stop_reason(uint16_t code)
 {
     switch (code)
@@ -213,7 +193,6 @@ static const char *get_stop_reason(uint16_t code)
             return "Неизвестная авария";
     }
 }
-
 
 /**
  * @brief Основная задача опроса Modbus для телеметрии
@@ -385,16 +364,8 @@ static void terminal_task(void *arg)
                 &screen_len
             );
 
-        if (ok)
-        {
-            /*
-            SEND ANSI TO ALL WS CLIENTS
-            */
-
-            web_server_send_binary(
-                screen,
-                screen_len
-            );
+        if (ok && screen_len > 0) {
+            web_server_send_binary(screen, screen_len);
         }
 
         vTaskDelay(pdMS_TO_TICKS(100));
@@ -415,4 +386,3 @@ void terminal_task_start(void)
         NULL
     );
 }
-
