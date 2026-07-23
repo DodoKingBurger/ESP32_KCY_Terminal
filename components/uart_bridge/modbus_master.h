@@ -5,6 +5,7 @@
 
 typedef enum
 {
+    MODBUS_END_OF_FILE = 1,   // <-- конец файла (не ошибка)
     MODBUS_OK = 0,
     MODBUS_ERR_TIMEOUT = -1,
     MODBUS_ERR_CRC = -2,
@@ -51,7 +52,8 @@ bool terminal_send_command(uint8_t slave_id,
 
 const char* get_key_code(const char *cmd);
 
-// ===== ДОБАВИТЬ ЭТИ ОБЪЯВЛЕНИЯ =====
+modbus_status_t modbus_read_file_0x64(uint8_t slave, uint32_t offset, 
+    uint32_t size, uint8_t *out, uint16_t *out_len);
 modbus_status_t modbus_read_file_0x14(uint8_t slave, uint16_t file_id, 
     uint16_t record_number, uint8_t *out, uint16_t *out_len);
 bool modbus_read_archive_size(uint8_t slave, uint32_t *size);

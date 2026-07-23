@@ -4,6 +4,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 
+extern bool load_page_active;
 extern bool download_in_progress;
 extern volatile bool download_stop_requested;
 

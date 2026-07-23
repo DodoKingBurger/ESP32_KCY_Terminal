@@ -136,6 +136,7 @@ function updateProgress(received) {
             etaSpan.innerText = '—';
         }
     } else {
+        const remaining = 0;
         speedSpan.innerText = "0 байт/с";
         etaSpan.innerText   = "—";
     }
@@ -340,11 +341,15 @@ function showTab(name) {
         terminalActive = true;
         resizeTerminal();
         stopArchiveSizePolling();
+        if (ws && ws.readyState === WebSocket.OPEN) 
+            ws.send(JSON.stringify({ action: "setTerminalActive", active: false }));
     } else {
         document.getElementById("downloads-page").classList.add("active");
         document.querySelectorAll(".tab")[1].classList.add("active");
         terminalActive = false;
         startArchiveSizePolling();
+        if (ws && ws.readyState === WebSocket.OPEN) 
+            ws.send(JSON.stringify({ action: "setTerminalActive", active: true }));
     }
 }
 
@@ -389,8 +394,13 @@ function connectWebSocket() {
 
     ws.onclose = () => {
         clearInterval(pingTimer);
+        clearInterval(downloadInterval);
+        clearInterval(archiveSizeTimer);
         document.getElementById("dot").classList.remove("connected");
         document.getElementById("status").innerText = "Disconnected";
+        downloadInProgress = false;
+        btnDownload.disabled = false;
+        btnStop.disabled = true;
         setTimeout(connectWebSocket, 2500);
     };
 
@@ -399,6 +409,7 @@ function connectWebSocket() {
     };
 
     ws.onmessage = (event) => {
+        console.log("WS message:", event.data); 
         // Обработка бинарных данных (ANSI-экран)
         if (event.data instanceof ArrayBuffer) {
             const bytes = new Uint8Array(event.data);
@@ -460,7 +471,7 @@ function connectWebSocket() {
                 clearInterval(downloadInterval);
                 btnDownload.disabled = false;
                 btnStop.disabled     = true;
-                updateProgress(msg.total || archiveSize);
+                updateProgress(0);
                 triggerBrowserDownload(msg.url || '/download', msg.fileName || fileName || 'archive.bin');
                 startArchiveSizePolling();
                 return;

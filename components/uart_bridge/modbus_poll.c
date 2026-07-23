@@ -13,6 +13,7 @@
 static const char *TAG = "MODBUS_POLL";
 
 extern bool download_in_progress;
+extern bool load_page_active;
 
 static const char *get_start_reason(uint8_t code)
 {
@@ -353,7 +354,7 @@ static void terminal_task(void *arg)
     while (1)
     {
         // Если идёт загрузка, пропускаем опрос экрана
-        if (download_in_progress) {
+        if (load_page_active || download_in_progress) {
             vTaskDelay(pdMS_TO_TICKS(100));
             continue;
         }

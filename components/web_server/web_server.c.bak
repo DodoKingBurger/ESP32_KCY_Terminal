@@ -13,7 +13,7 @@
 #include "freertos/task.h"
 
 static const char *TAG = "WS";
-bool load_page_active = false;
+bool terminal_page_active = false;
 static SemaphoreHandle_t ws_mutex      = NULL;
 static httpd_handle_t    server        = NULL;
 
@@ -51,7 +51,7 @@ void web_server_send(const char *json)
     esp_err_t ret = httpd_ws_send_frame_async(server, terminal_owner_fd, &ws);
     xSemaphoreGive(ws_mutex);
 
-    if (ret != ESP_OK && ret != ESP_ERR_TIMEOUT) {
+    if (ret != ESP_OK) {
         ESP_LOGW(TAG, "ws_send_text failed, releasing terminal");
         terminal_owner_fd = -1;
         if (archive_manager_is_downloading()) {
@@ -259,9 +259,9 @@ static esp_err_t ws_handler(httpd_req_t *req)
         }
         if (strstr(cmd, "\"action\":\"setTerminalActive\"")) {
             if (strstr(cmd, "\"active\":true")) {
-                load_page_active = true;
+                terminal_page_active = true;
             } else {
-                load_page_active = false;
+                terminal_page_active = false;
             }
             free(frame.payload);
             return ESP_OK;

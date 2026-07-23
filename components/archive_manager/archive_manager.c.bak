@@ -185,7 +185,7 @@ void archive_manager_on_ws_command(const char *cmd)
         archive_publish(NULL, 0, NULL);
         if (download_task_handle == NULL) {
             xTaskCreatePinnedToCore(
-                download_task, "download", 12288, NULL, 4,
+                download_task, "download", 8192, NULL, 4,
                 &download_task_handle, tskNO_AFFINITY);
         }
         return;
@@ -234,49 +234,50 @@ static void download_task(void *arg)
     bool     end_reached      = false;
     bool     first_packet     = true;
     int64_t  last_progress_us = 0;
+    int32_t record_num = 0;
 
     while (!download_stop_requested && !end_reached) {
         if (total_size - written == 0) break;
 
-        uint32_t offset = download_offset;
-        uint8_t  chunk[2050] = {0};
-        uint16_t len = 0;
+        uint16_t offset =  download_offset;
+        uint8_t  chunk[2050]   = {0};
+        uint16_t len          = 0;
 
         bool ok = false;
         for (int attempt = 0; attempt < 3 && !ok; attempt++) {
-            modbus_status_t s = modbus_read_file_0x64(1, offset, 2000, chunk, &len);
-            if (s == MODBUS_OK) {
-                ok = true;
-                break;
-            }else if (s== MODBUS_END_OF_FILE){
-                end_reached = true;
-                break;
-            } 
-            else {
-                vTaskDelay(pdMS_TO_TICKS(200));
-            }
+            modbus_status_t s = modbus_read_file_0x64(1, offset,2000, chunk, &len);
+            if (s == MODBUS_OK) ok = true;
+            else vTaskDelay(pdMS_TO_TICKS(200));
         }
-        
         if (!ok) {
             web_server_send("{\"type\":\"error\",\"msg\":\"Failed to read data after retries\"}");
             free(buf);
             goto cleanup;
         }
-        if (len == 0) { 
-            end_reached = true; 
-            break; 
-        }
+        if (len == 0) { end_reached = true; break; }
+
+        uint16_t original_len = len;
         
         // Извлекаем имя из первого пакета
         if (first_packet && len >= 132) {
-
-            char decoded_name[256] = {0};
-            int i = 0;
-            while (i < 128 && (4 + i) < len) {
-                decoded_name[i] = chunk[4 + i];
-                i++;
+            uint8_t raw_name[128] = {0};
+            for (int i = 0; i < 128 && (4 + i) < len; i++) {
+                raw_name[i] = chunk[4 + i];
             }
-            decoded_name[i] = '\0';
+            
+            for (int i = 0; i < 127; i += 2) {
+                uint8_t tmp = raw_name[i];
+                raw_name[i] = raw_name[i + 1];
+                raw_name[i + 1] = tmp;
+            }
+            
+            char decoded_name[256] = {0};
+            int name_len = 0;
+            while (name_len < 128 && raw_name[name_len] != 0) {
+                decoded_name[name_len] = (char)raw_name[name_len];
+                name_len++;
+            }
+            decoded_name[name_len] = '\0';
             
             if (decoded_name[0] == '_' || decoded_name[0] == '/') {
                 memmove(decoded_name, decoded_name + 1, strlen(decoded_name));
@@ -338,7 +339,7 @@ static void download_task(void *arg)
             end_reached = true;
         }
         memcpy(buf + written, chunk, len);
-        written += len;
+        written         += len;
         download_offset += 2000;
 
         int64_t now_us = esp_timer_get_time();
@@ -352,7 +353,7 @@ static void download_task(void *arg)
             web_server_send(pm);
         }
         vTaskDelay(pdMS_TO_TICKS(5));
-    } // <-- ЭТА СКОБКА БЫЛА ПРОПУЩЕНА!
+    }
 
     if (download_stop_requested) {
         for (size_t i = 0; i + 1 < written; i += 2) {
@@ -372,11 +373,11 @@ static void download_task(void *arg)
                  utf8_name[0] ? utf8_name : "archive_part.bin");
         web_server_send(stop_msg);
     } else if (end_reached || written >= total_size) {
-        //for (size_t i = 0; i + 1 < written; i += 2) {
-            //uint8_t tmp = buf[i];
-            //buf[i] = buf[i + 1];
-            //buf[i + 1] = tmp;
-        //}
+        for (size_t i = 0; i + 1 < written; i += 2) {
+            uint8_t tmp = buf[i];
+            buf[i] = buf[i + 1];
+            buf[i + 1] = tmp;
+        }
         archive_publish(buf, written,
                         utf8_name[0] ? utf8_name : "archive.bin");
         char complete_msg[600];
@@ -391,7 +392,6 @@ static void download_task(void *arg)
     }
 
 cleanup:
-    web_server_send("{\"type\":\"log\",\"msg\":\"cleanup\"}");
     download_in_progress    = false;
     download_task_handle    = NULL;
     vTaskDelete(NULL);
