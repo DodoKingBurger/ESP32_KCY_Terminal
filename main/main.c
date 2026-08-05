@@ -1,11 +1,3 @@
-/* UART Echo Example
-
-   This example code is in the Public Domain (or CC0 licensed, at your option.)
-
-   Unless required by applicable law or agreed to in writing, this
-   software is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR
-   CONDITIONS OF ANY KIND, either express or implied.
-*/
 #include <stdio.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -13,33 +5,18 @@
 #include "driver/gpio.h"
 #include "sdkconfig.h"
 #include "esp_log.h"
-
+#include "esp_system.h"
 #include "nvs_flash.h"
+#include "esp_netif.h"
+#include "esp_event.h"
+
 #include "uart_bridge.h"
 #include "wifi_manager.h"
 #include "dns_server.h"
 #include "web_server.h"
 #include "modbus_poll.h"
-/**
- * This is an example which echos any data it receives on configured UART back to the sender,
- * with hardware flow control turned off. It does not use UART driver event queue.
- *
- * - Port: configured UART
- * - Receive (Rx) buffer: on
- * - Transmit (Tx) buffer: off
- * - Flow control: off
- * - Event queue: off
- * - Pin assignment: see defines below (See Kconfig)
- */
 
-#define ECHO_TEST_TXD (CONFIG_EXAMPLE_UART_TXD)
-#define ECHO_TEST_RXD (CONFIG_EXAMPLE_UART_RXD)
-#define ECHO_TEST_RTS (UART_PIN_NO_CHANGE)
-#define ECHO_TEST_CTS (UART_PIN_NO_CHANGE)
-
-#define ECHO_UART_PORT_NUM      (CONFIG_EXAMPLE_UART_PORT_NUM)
-#define ECHO_UART_BAUD_RATE     (CONFIG_EXAMPLE_UART_BAUD_RATE)
-#define ECHO_TASK_STACK_SIZE    (CONFIG_EXAMPLE_TASK_STACK_SIZE)
+static const char *TAG = "MAIN";
 
 /**
  * @brief Главная точка входа приложения.
@@ -48,15 +25,37 @@
  */
 void app_main(void)
 {
-    nvs_flash_init();
+    ESP_LOGI(TAG, "=== APPLICATION START ===");
     
+    // 1. Инициализация NVS
+    esp_err_t ret = nvs_flash_init();
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_LOGI(TAG, "Erasing NVS...");
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        ret = nvs_flash_init();
+    }
+    ESP_ERROR_CHECK(ret);
+
+    // 3. Инициализация UART
     uart_bridge_init();
+    ESP_LOGI(TAG, "UART bridge initialized");
 
+    // 4. Запуск WiFi
     wifi_manager_start();
+    ESP_LOGI(TAG, "WiFi started");
 
+    // 5. Запуск DNS
     dns_server_start();
+    ESP_LOGI(TAG, "DNS started");
 
+    // 6. Запуск веб-сервера
     web_server_start();
+    ESP_LOGI(TAG, "Web server started");
 
+    // 7. Запуск задачи терминала
     terminal_task_start();
+    ESP_LOGI(TAG, "Terminal task started");
+
+    ESP_LOGI(TAG, "=== ALL SYSTEMS GO ===");
+    ESP_LOGI(TAG, "Free heap: %d", esp_get_free_heap_size());
 }

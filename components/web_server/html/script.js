@@ -375,7 +375,7 @@ function connectWebSocket() {
 
         // Отправка времени — с небольшой задержкой
         setTimeout(() => {
-            requestArchiveSize();
+            //requestArchiveSize();
             const now = new Date();
             const timeMsg = JSON.stringify({
                 action: "setTime",
@@ -440,9 +440,6 @@ function connectWebSocket() {
             try {
                 msg = JSON.parse(event.data);
             } catch (e) {
-                if (terminalActive) {
-                    term.writeln('\x1b[31m' + event.data + '\x1b[0m');
-                }
                 console.log('Non-JSON string:', event.data);
                 return;
             }

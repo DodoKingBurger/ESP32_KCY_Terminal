@@ -566,7 +566,7 @@ modbus_status_t modbus_read_file_0x64(uint8_t slave, uint32_t offset,
     int written = uart_bridge_send(request, pos);
 
     uint8_t response[4096];
-    int len = uart_bridge_receive(response, sizeof(response), pdMS_TO_TICKS(500));
+    int len = uart_bridge_receive(response, sizeof(response), pdMS_TO_TICKS(400));
 
     //snprintf(diag_msg, sizeof(diag_msg), "{\"type\":\"log\",\"msg\":\"0x64 recv: %d bytes\"}", len);
     //web_server_send(diag_msg);
