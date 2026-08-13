@@ -1,7 +1,9 @@
 // ======================================================================
 // ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ
 // ======================================================================
-
+// Добавить переменные в начало
+let lastProgressUpdate = 0;
+const PROGRESS_UPDATE_INTERVAL = 100; // мс
 /** @type {number} Количество столбцов терминала */
 let termCols = 80;
 /** @type {number} Количество строк терминала */
@@ -29,7 +31,6 @@ document.addEventListener('DOMContentLoaded', function() {
     resizeTerminal();
     term.writeln('ESP32 Terminal');
     term.writeln('');
-    // Остальной код инициализации (WebSocket, resize, etc.)
     connectWebSocket();
     window.addEventListener('resize', resizeTerminal);
     const ro = new ResizeObserver(resizeTerminal);
@@ -59,10 +60,17 @@ let downloadInterval = null;
 let archiveSizeTimer = null;
 /** @type {string} Имя файла архива */
 let fileName = '';
-/** @type {string|null} Последний URL для скачивания */
-let lastDownloadUrl = null;
 /** @type {number|null} Идентификатор requestAnimationFrame для прогресса */
 let progressRaf = null;
+
+// ===== ФЛАГИ ДЛЯ ЗАЩИТЫ ОТ ПОВТОРОВ =====
+let downloadController = null;
+let httpDownloadInProgress = false;
+let downloadStarted = false;
+let isFetching = false;
+let pendingStartDownload = false;
+let isProcessing = false;
+let startDownloadRequested = false; // Флаг: запрос на старт отправлен, ждем подтверждения
 
 // DOM-элементы для страницы загрузок
 const archiveSizeSpan   = document.getElementById("archive-size");
@@ -123,7 +131,7 @@ function updateProgress(received) {
     progressText.innerText  = Math.round(Math.min(percent, 100)) + '%';
     receivedBytesSpan.innerText = received;
 
-    if (downloadInProgress && received > 0) {
+    if (downloadInProgress && received > 0 && startTime) {
         const elapsed    = Date.now() - startTime;
         const elapsedSec = elapsed / 1000;
         const speed      = received / elapsedSec;
@@ -136,7 +144,6 @@ function updateProgress(received) {
             etaSpan.innerText = '—';
         }
     } else {
-        const remaining = 0;
         speedSpan.innerText = "0 байт/с";
         etaSpan.innerText   = "—";
     }
@@ -157,41 +164,173 @@ function scheduleProgressUpdate(received, total) {
     });
 }
 
+// В script.js, добавить проверку соединения перед каждой отправкой
+function isConnectionHealthy() {
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+        return false;
+    }
+    return true;
+}
+
+// ======================================================================
+// СКАЧИВАНИЕ ФАЙЛА
+// ======================================================================
+
 /**
  * @brief Скачивает файл через fetch и отображает прогресс
  * @param {string} url - URL для скачивания
- * @param {string} filename - имя сохраняемого файла
  */
-async function triggerBrowserDownload(url, filename) {
+async function triggerBrowserDownload(url) {
+    if (isFetching) {
+        console.warn("⚠️ Fetch already in progress, ignoring duplicate call");
+        return;
+    }
+    
+    if (downloadController) {
+        console.warn("⚠️ Aborting previous download");
+        downloadController.abort();
+        downloadController = null;
+    }
+    
+    isFetching = true;
+    httpDownloadInProgress = true;
+    
+    let chunks = [];
+    let received = 0;
+    let chunkCount = 0;
+    let firstChunkReceived = false;
     try {
-        const res = await fetch(url, { cache: "no-store" });
-        if (!res.ok) throw new Error("HTTP " + res.status);
-        const total   = parseInt(res.headers.get("Content-Length") || "0", 10);
-        const reader  = res.body.getReader();
-        const chunks  = [];
-        let received  = 0;
+        console.log("📥 Starting HTTP fetch:", url);
+        downloadController = new AbortController();
+
+        
+        const res = await fetch(url, { 
+            cache: "no-store",
+            signal: downloadController.signal,
+            headers: {
+                'Connection': 'keep-alive'
+            }
+        });
+        
+        console.log("📥 HTTP response:", res.status, res.statusText);
+        console.log("📥 Headers:", [...res.headers.entries()]);
+        
+        if (!res.ok) {
+            throw new Error("HTTP " + res.status);
+        }
+        
+        if (!res.body) {
+            console.warn("⚠️ No response body");
+            throw new Error("No response body");
+        }
+        
+        const reader = res.body.getReader();
+        
+        const contentLength = res.headers.get("Content-Length");
+        if (contentLength) {
+            archiveSize = parseInt(contentLength, 10);
+            totalBytesSpan.innerText = archiveSize;
+            console.log("📥 Content-Length:", archiveSize);
+        }
+        
+        console.log("📥 Starting to read chunks...");
+        
         while (true) {
             const { done, value } = await reader.read();
-            if (done) break;
+            
+            if (done) {
+                console.log("📥 Reader done, total chunks:", chunkCount);
+                break;
+            }
+            
+            if (!firstChunkReceived) {
+                firstChunkReceived = true;
+                console.log("📥 First chunk received!");
+            }
+            
+            chunkCount++;
             chunks.push(value);
             received += value.byteLength;
-            scheduleProgressUpdate(received, total || archiveSize);
+            
+            console.log(`📥 Chunk ${chunkCount}: ${value.byteLength} bytes, total: ${received}`);
+            const now = Date.now();
+            if (now - lastProgressUpdate > PROGRESS_UPDATE_INTERVAL) {
+                lastProgressUpdate = now;           
+                if (archiveSize > 0) {
+                    const percent = (received / archiveSize * 100);
+                    progressBar.style.width = Math.min(percent, 100) + '%';
+                    progressText.innerText = Math.round(Math.min(percent, 100)) + '%';
+                    receivedBytesSpan.innerText = received;
+                    
+                    if (startTime) {
+                        const elapsed = Date.now() - startTime;
+                        const elapsedSec = elapsed / 1000;
+                        if (elapsedSec > 0) {
+                            const speed = received / elapsedSec;
+                            speedSpan.innerText = Math.round(speed) + " байт/с";
+                            elapsedSpan.innerText = formatTime(elapsed);
+                            
+                            if (archiveSize > received && speed > 0) {
+                                const remaining = (archiveSize - received) / speed;
+                                etaSpan.innerText = formatTime(remaining * 1000);
+                            }
+                        }
+                    }
+                }
+            }
+            //if (chunkCount % 10 === 0 && !isConnectionHealthy()) {
+                //console.warn("⚠️ WebSocket disconnected during download");
+            // Сохраняем прогресс и пробуем переподключиться
+            //}
         }
-        const blob  = new Blob(chunks);
-        const objUrl= URL.createObjectURL(blob);
-        const a     = document.createElement("a");
-        a.href = objUrl;
-        a.download = filename || "archive.bin";
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
-        setTimeout(() => URL.revokeObjectURL(objUrl), 2000);
-        lastDownloadUrl = url;
+        
+        console.log("✅ Download complete, received:", received, "bytes");
+        
+        if (archiveSize > 0 && received < archiveSize) {
+            console.warn("⚠️ WARNING: Incomplete download! Received " + received + "/" + archiveSize + " bytes");
+        }
+        
+        if (chunks.length > 0 && received > 0) {
+            console.log("📦 Creating blob from", chunks.length, "chunks");
+            const blob = new Blob(chunks);
+            const objUrl = URL.createObjectURL(blob);
+            const a = document.createElement("a");
+            a.href = objUrl;
+            a.download = fileName || "archive.bin";
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            setTimeout(() => URL.revokeObjectURL(objUrl), 2000);
+        } else {
+            console.warn("⚠️ No data received, skipping file creation");
+        }
+        
     } catch (e) {
-        if (terminalActive) term.writeln("\x1b[31mНе удалось скачать файл: " + e.message + "\x1b[0m");
-        console.error("Download error:", e);
+        if (e.name === 'AbortError') {
+            console.log("⏹️ Download aborted by user or timeout");
+            if (chunks.length > 0 && received > 0) {
+                console.log("📦 Saving partial download, received:", received, "bytes");
+                const blob = new Blob(chunks);
+                const objUrl = URL.createObjectURL(blob);
+                const a = document.createElement("a");
+                a.href = objUrl;
+                a.download = fileName || "partial_archive.bin";
+                document.body.appendChild(a);
+                a.click();
+                a.remove();
+                setTimeout(() => URL.revokeObjectURL(objUrl), 2000);
+            }
+        } else {
+            console.error("❌ Download error:", e);
+            console.error("❌ Error stack:", e.stack);
+        }
+    } finally {
+        httpDownloadInProgress = false;
+        downloadController = null;
+        isFetching = false;
     }
 }
+
 // ======================================================================
 // ОПРОС РАЗМЕРА АРХИВА
 // ======================================================================
@@ -237,44 +376,93 @@ function startDownload() {
         if (terminalActive) term.writeln("\x1b[31mНет соединения с сервером\x1b[0m");
         return;
     }
-    if (downloadInProgress) return;
+    
+    if (downloadStarted && downloadInProgress) {
+        console.log("⏳ Download already started, ignoring");
+        return;
+    }
+    
+    if (isFetching) {
+        console.log("⏳ Fetch already in progress, ignoring");
+        return;
+    }
+    
     if (archiveSize <= 0) {
         if (terminalActive) term.writeln("\x1b[33mРазмер архива неизвестен. Подождите обновления.\x1b[0m");
         return;
     }
+    
+    console.log("🚀 Starting download, archiveSize:", archiveSize);
+    
     stopArchiveSizePolling();
-    totalReceived     = 0;
-    downloadInProgress= true;
-    startTime         = Date.now();
-    fileName          = '';
+    totalReceived = 0;
+    downloadInProgress = true;
+    downloadStarted = true;
+    startTime = Date.now();
+    fileName = '';
+    startDownloadRequested = true; // Ждем подтверждения
+    
     btnDownload.disabled = true;
-    btnStop.disabled     = false;
+    btnStop.disabled = false;
     updateProgress(0);
-
-    ws.send(JSON.stringify({ action: "startDownload" }));
-
+    
     if (downloadInterval) clearInterval(downloadInterval);
     downloadInterval = setInterval(() => {
-        if (downloadInProgress) {
+        if (downloadInProgress && startTime) {
             elapsedSpan.innerText = formatTime(Date.now() - startTime);
-        } else {
-            clearInterval(downloadInterval);
         }
     }, 1000);
+    
+    // Отправляем команду на сервер
+    ws.send(JSON.stringify({ action: "startDownload" }));
+    console.log("📤 Sent startDownload command to server");
 }
 
 /**
  * @brief Отправляет команду остановки загрузки архива
  */
 function stopDownload() {
-    if (!ws || ws.readyState !== WebSocket.OPEN) return;
-    if (!downloadInProgress) return;
-    ws.send(JSON.stringify({ action: "stopDownload" }));
-    if (terminalActive) term.writeln("\x1b[33mОстановка запрошена\x1b[0m");
+    console.log("⏹️ Stop download requested");
+    downloadStarted = false;
+    startDownloadRequested = false;
+    
+    // Останавливаем HTTP-запрос
+    if (downloadController) {
+        downloadController.abort();
+        downloadController = null;
+        httpDownloadInProgress = false;
+        isFetching = false;
+    }
+    
+    // Отправляем команду остановки на сервер
+    if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ action: "stopDownload" }));
+        if (terminalActive) term.writeln("\x1b[33mОстановка запрошена\x1b[0m");
+    }
+    
+    // Сбрасываем состояние
+    downloadInProgress = false;
+    btnDownload.disabled = false;
+    btnStop.disabled = true;
+    
+    if (downloadInterval) {
+        clearInterval(downloadInterval);
+        downloadInterval = null;
+    }
+    
+    // Сбрасываем прогресс
+    progressBar.style.width = '0%';
+    progressText.innerText = '0%';
+    receivedBytesSpan.innerText = '0';
+    speedSpan.innerText = '0 байт/с';
+    elapsedSpan.innerText = '00:00';
+    etaSpan.innerText = '—';
+    
+    startArchiveSizePolling();
 }
 
 // ======================================================================
-// ПАРСИНГ СПЕЦИАЛЬНЫХ ПОСЛЕДОВАТЕЛЬНОСТЕЙ ТЕРМИНАЛА
+// ПАРСИНГ СПЕЦИАЛЬНЫХ ПОСЛЕДОВАТЕЛЬНОСТЕЙ
 // ======================================================================
 
 /**
@@ -308,7 +496,7 @@ function parseLampState(text) {
 }
 
 // ======================================================================
-// ОТПРАВКА КОМАНД НА СЕРВЕР
+// ОТПРАВКА КОМАНД
 // ======================================================================
 
 /**
@@ -354,28 +542,23 @@ function showTab(name) {
 }
 
 // ======================================================================
-// УСТАНОВКА WEBSOCKET-СОЕДИНЕНИЯ
+// WEBSOCKET СОЕДИНЕНИЕ
 // ======================================================================
 
-/**
- * @brief Устанавливает WebSocket-соединение с сервером и настраивает обработчики
- */
 function connectWebSocket() {
-    if (ws) ws.close(); // закрываем старое, если есть
+    if (ws) ws.close();
     ws = new WebSocket(`ws://${location.host}/ws`);
     ws.binaryType = "arraybuffer";
 
     ws.onopen = () => {
-        console.log("WebSocket connected");
+        console.log("🔗 WebSocket connected");
         pingTimer = setInterval(() => {
             if (ws.readyState === WebSocket.OPEN) ws.send("ping");
-        }, 5000);
+        }, 15000);
         document.getElementById("dot").classList.add("connected");
         document.getElementById("status").innerText = "Connected";
 
-        // Отправка времени — с небольшой задержкой
         setTimeout(() => {
-            //requestArchiveSize();
             const now = new Date();
             const timeMsg = JSON.stringify({
                 action: "setTime",
@@ -389,7 +572,7 @@ function connectWebSocket() {
             if (ws.readyState === WebSocket.OPEN) {
                 ws.send(timeMsg);
             }
-        }, 500); // небольшая задержка
+        }, 500);
     };
 
     ws.onclose = () => {
@@ -399,18 +582,20 @@ function connectWebSocket() {
         document.getElementById("dot").classList.remove("connected");
         document.getElementById("status").innerText = "Disconnected";
         downloadInProgress = false;
+        downloadStarted = false;
+        isFetching = false;
+        startDownloadRequested = false;
         btnDownload.disabled = false;
         btnStop.disabled = true;
         setTimeout(connectWebSocket, 2500);
     };
 
     ws.onerror = (err) => {
-        console.error('WS error:', err);
+        console.error('❌ WS error:', err);
     };
 
     ws.onmessage = (event) => {
-        console.log("WS message:", event.data); 
-        // Обработка бинарных данных (ANSI-экран)
+        // Обработка бинарных данных
         if (event.data instanceof ArrayBuffer) {
             const bytes = new Uint8Array(event.data);
             const filtered = bytes.map(b => {
@@ -434,7 +619,7 @@ function connectWebSocket() {
             return;
         }
 
-        // Обработка текстовых сообщений (JSON)
+        // Обработка текстовых сообщений
         if (typeof event.data === 'string') {
             let msg;
             try {
@@ -444,64 +629,105 @@ function connectWebSocket() {
                 return;
             }
 
-            if (msg.type === "log") {
-                console.log("[LOG]", msg.msg);
-                return;
-            }
-            if (msg.type === "archiveSize") {
-                archiveSize = msg.size;
-                archiveSizeSpan.innerText = archiveSize + " байт";
-                totalBytesSpan.innerText  = archiveSize;
-                if (!downloadInProgress) updateProgress(0);
-                return;
-            }
-            if (msg.type === "fileName") {
-                fileName = msg.name || '';
-                return;
-            }
-            if (msg.type === "progress") {
-                scheduleProgressUpdate(msg.received, msg.total);
-                return;
-            }
-            if (msg.type === "downloadComplete") {
-                downloadInProgress = false;
-                clearInterval(downloadInterval);
-                btnDownload.disabled = false;
-                btnStop.disabled     = true;
-                updateProgress(0);
-                triggerBrowserDownload(msg.url || '/download', msg.fileName || fileName || 'archive.bin');
-                startArchiveSizePolling();
-                return;
-            }
-            if (msg.type === "downloadStopped") {
-                downloadInProgress = false;
-                clearInterval(downloadInterval);
-                btnDownload.disabled = false;
-                btnStop.disabled     = true;
-                updateProgress(msg.received || totalReceived);
-                if (msg.url) {
-                    const a = document.createElement("a");
-                    a.href = msg.url;
-                    a.download = msg.fileName || "archive_part.bin";
-                    document.body.appendChild(a);
-                    a.click();
-                    a.remove();
-                    console.log("Скачана неполная версия архива.");
+            console.log("📨 WS message:", msg.type, msg);
+
+            switch (true){
+                // ===== ОБРАБОТКА ЛОГА "Download start requested" =====
+                case (msg.type === "log" && msg.msg === "Download start requested"): {
+                    // Сервер подтвердил запрос на старт - теперь запускаем HTTP-запрос
+                    if (startDownloadRequested && !isFetching && !httpDownloadInProgress) {
+                        console.log("🚀 Server confirmed, starting HTTP fetch...");
+                        // Запускаем HTTP-загрузку
+                        triggerBrowserDownload('/download');
+                    } else {
+                        console.log("ℹ️ Download start confirmed, but already in progress");
+                    }
+                    break;
                 }
-                startArchiveSizePolling();
-                return;
+
+                // ===== ОБРАБОТКА startDownload (если сервер все-таки присылает) =====
+                case (msg.type === "startDownload" || msg.type === "startHttpDownload"): {
+                    if (isFetching || httpDownloadInProgress) {
+                        console.warn("⚠️ Ignoring startDownload - already in progress");
+                        break;
+                    }
+                    
+                    if (downloadInProgress) {
+                        console.warn("⚠️ Ignoring startDownload - download already in progress");
+                        break;
+                    }
+                    
+                    const url = msg.url || '/download';
+                    
+                    downloadInProgress = true;
+                    startTime = Date.now();
+                    btnDownload.disabled = true;
+                    btnStop.disabled = false;
+                    totalReceived = 0;
+                    updateProgress(0);
+                    
+                    triggerBrowserDownload(url);
+                    break;
+                }
+                
+                // ===== ОСТАЛЬНЫЕ ОБРАБОТЧИКИ =====
+                case (msg.type === "log"): {
+                    console.log("[LOG]", msg.msg);
+                    break;
+                }
+                
+                case (msg.type === "archiveSize"): {
+                    archiveSize = msg.size;
+                    archiveSizeSpan.innerText = archiveSize + " байт";
+                    totalBytesSpan.innerText  = archiveSize;
+                    if (!downloadInProgress) updateProgress(0);
+                    break;
+                }
+                
+                case (msg.type === "fileName"): {
+                    fileName = msg.name || '';
+                    break;
+                }
+                
+                case (msg.type === "progress"): {
+                    scheduleProgressUpdate(msg.received, msg.total);
+                    break;
+                }
+                
+                case (msg.type === "downloadComplete" || msg.type === "downloadStopped"): {
+                    downloadStarted = false;
+                    downloadInProgress = false;
+                    httpDownloadInProgress = false;
+                    downloadController = null;
+                    isFetching = false;
+                    startDownloadRequested = false;
+                    
+                    clearInterval(downloadInterval);
+                    btnDownload.disabled = false;
+                    btnStop.disabled = true;
+                    updateProgress(0);
+                    startArchiveSizePolling();
+                    break;
+                }
+                
+                case (msg.type === "error"): {
+                    downloadInProgress = false;
+                    isFetching = false;
+                    startDownloadRequested = false;
+                    clearInterval(downloadInterval);
+                    btnDownload.disabled = false;
+                    btnStop.disabled = true;
+                    const errMsg = "Ошибка: " + (msg.msg || '');
+                    if (terminalActive) term.writeln("\x1b[31m" + errMsg + "\x1b[0m");
+                    console.error(errMsg);
+                    break;
+                }
+
+                default:{
+                    console.error('❌ Unknown JSON:', msg);
+                    break;
+                }
             }
-            if (msg.type === "error") {
-                downloadInProgress = false;
-                clearInterval(downloadInterval);
-                btnDownload.disabled = false;
-                btnStop.disabled     = true;
-                const errMsg = "Ошибка: " + (msg.msg || '');
-                if (terminalActive) term.writeln("\x1b[31m" + errMsg + "\x1b[0m");
-                console.error(errMsg);
-                return;
-            }
-            console.error('Unknown JSON:', msg);
         }
     };
 }
@@ -511,7 +737,7 @@ function connectWebSocket() {
 // ======================================================================
 
 document.addEventListener("keydown", e => {
-    console.log("keydown event:", e.key);  // <-- ДОБАВЬТЕ
+    console.log("keydown event:", e.key);
     if (!terminalActive) return;
     switch (e.key) {
         case "1": sendKey("f1"); break;
@@ -529,14 +755,13 @@ document.addEventListener("keydown", e => {
         case "6": sendKey("stop"); break;
         default: return;
     }
-    e.preventDefault(); // предотвращаем стандартное поведение
+    e.preventDefault();
 });
 
 // ======================================================================
 // ЗАПУСК ПРИ ЗАГРУЗКЕ СТРАНИЦЫ
 // ======================================================================
 
-//connectWebSocket();
 window.addEventListener('resize', resizeTerminal);
 window.addEventListener('beforeunload', function() {
     if (ws && ws.readyState === WebSocket.OPEN && downloadInProgress) {

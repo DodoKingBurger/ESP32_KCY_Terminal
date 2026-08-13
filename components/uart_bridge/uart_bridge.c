@@ -99,7 +99,7 @@ int uart_bridge_send(
 
     uart_wait_tx_done(
         UART_PORT,
-        pdMS_TO_TICKS(200)
+        pdMS_TO_TICKS(300)
     );
     xSemaphoreGive(uart_mutex);
     return ret;

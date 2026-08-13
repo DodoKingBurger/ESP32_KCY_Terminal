@@ -1,4 +1,4 @@
-#include "modbus_master.h"
+﻿#include "modbus_master.h"
 
 #include "uart_bridge.h"
 #include "mbcrc.h"
@@ -524,20 +524,15 @@ const char*  get_key_code(const char *cmd)
  */
 modbus_status_t modbus_read_file_0x64(uint8_t slave, uint32_t offset, 
     uint32_t size, uint8_t *out, uint16_t *out_len)
-{
+{   
     char diag_msg[256];
-    
-    if (size > 4096) {
-        snprintf(diag_msg, sizeof(diag_msg), "{\"type\":\"log\",\"msg\":\"0x64: size too large: %lu\"}", (unsigned long)size);
-        web_server_send(diag_msg);
+    if (size > 2048) {
         return MODBUS_ERR_UART;
     }
     if (size == 0) {
         *out_len = 0;
-        web_server_send("{\"type\":\"log\",\"msg\":\"0x64 size = 0\"}");
         return MODBUS_OK;
     }
-
     uint8_t request[32];
     int pos = 0;
     request[pos++] = slave;
@@ -557,83 +552,48 @@ modbus_status_t modbus_read_file_0x64(uint8_t slave, uint32_t offset,
     request[pos++] = crc & 0xFF;
     request[pos++] = crc >> 8;
 
-    // Логируем запрос (без HEX-дампа, чтобы не переполнять буфер)
-    //snprintf(diag_msg, sizeof(diag_msg), 
-             //"{\"type\":\"log\",\"msg\":\"0x64 REQ: off=%lu size=%lu CRC=0x%04X\"}", 
-             //(unsigned long)offset, (unsigned long)size, crc);
-    //web_server_send(diag_msg);
-
     int written = uart_bridge_send(request, pos);
+    if (written != pos) {
+        return MODBUS_ERR_UART;
+    }
 
     uint8_t response[4096];
-    int len = uart_bridge_receive(response, sizeof(response), pdMS_TO_TICKS(400));
-
-    //snprintf(diag_msg, sizeof(diag_msg), "{\"type\":\"log\",\"msg\":\"0x64 recv: %d bytes\"}", len);
-    //web_server_send(diag_msg);
+    int len = uart_bridge_receive(response, sizeof(response), pdMS_TO_TICKS(500));
 
     if (len <= 0) {
-        web_server_send("{\"type\":\"log\",\"msg\":\"0x64 TIMEOUT\"}");
         return MODBUS_ERR_TIMEOUT;
     }
-
-    // Логируем ТОЛЬКО ПЕРВЫЕ 16 байт ответа (безопасно)
-    //char hex_buf[64] = {0};
-    //int log_len = (len > 16) ? 16 : len;
-    //for (int i = 0; i < log_len; i++) {
-        //char tmp[4];
-        //snprintf(tmp, sizeof(tmp), "%02X ", response[i]);
-        //strcat(hex_buf, tmp);
-    //}
-    //snprintf(diag_msg, sizeof(diag_msg), "{\"type\":\"log\",\"msg\":\"0x64 resp: %s\"}", hex_buf);
-   // web_server_send(diag_msg);
-
-    // Проверяем код функции
     if (response[1] == 0xE4) {
-        uint8_t err_code = response[2];
-        snprintf(diag_msg, sizeof(diag_msg), "{\"type\":\"log\",\"msg\":\"0x64 ERROR: 0x%02X\"}", err_code);
-        web_server_send(diag_msg);
-        if (err_code == 0x03) {
-            *out_len = 0;
-            return MODBUS_END_OF_FILE;
-        }
+        //if (err_code == 0x03) {
+            //*out_len = 0;
+            //return MODBUS_END_OF_FILE;
+        //}
         return MODBUS_ERR_UART;
     }
-
     if (response[1] != 0x64) {
-        snprintf(diag_msg, sizeof(diag_msg), "{\"type\":\"log\",\"msg\":\"0x64 wrong func: 0x%02X\"}", response[1]);
-        web_server_send(diag_msg);
         return MODBUS_ERR_UART;
     }
-
     if (!mbcrc_is_valid(response, len)) {
-        web_server_send("{\"type\":\"log\",\"msg\":\"0x64 CRC ERR\"}");
         return MODBUS_ERR_CRC;
     }
 
     uint32_t resp_size = (response[8] << 24) | (response[9] << 16) | (response[10] << 8) | response[11];
-    //snprintf(diag_msg, sizeof(diag_msg), "{\"type\":\"log\",\"msg\":\"0x64 size=%lu\"}", (unsigned long)resp_size);
-    //web_server_send(diag_msg);
 
     if (resp_size == 0) {
         *out_len = 0;
-        web_server_send("{\"type\":\"log\",\"msg\":\"0x64 END_OF_FILE\"}");
         return MODBUS_END_OF_FILE;
     }
 
-    int data_offset = 12;
-    int data_len = len - data_offset - 2;
+        int data_offset = 12;
+        int data_len = len - data_offset - 2;
     if (data_len <= 0) {
-        web_server_send("{\"type\":\"log\",\"msg\":\"0x64 no data\"}");
         return MODBUS_ERR_UART;
     }
     if (data_len > resp_size) data_len = resp_size;
     if (data_len > size) data_len = size;
     memcpy(out, &response[data_offset], data_len);
     *out_len = data_len;
-    
-    //snprintf(diag_msg, sizeof(diag_msg), "{\"type\":\"log\",\"msg\":\"0x64 OK: %d\"}", data_len);
-    //web_server_send(diag_msg);
-    
+        
     return MODBUS_OK;
 }
 

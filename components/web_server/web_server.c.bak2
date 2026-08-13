@@ -32,37 +32,6 @@ static esp_err_t ws_handler           (httpd_req_t *req);
 static esp_err_t xterm_js_handler     (httpd_req_t *req);
 static esp_err_t xterm_css_handler    (httpd_req_t *req);
 static esp_err_t favicon_handler      (httpd_req_t *req);
-static TaskHandle_t ws_ping_task_handle = NULL;
-
-// Функция задачи для обработки пингов
-static void ws_ping_task(void *pvParameters)
-{
-    while (1) {
-        vTaskDelay(pdMS_TO_TICKS(3000)); // Каждые 3 секунды
-        if (archive_manager_is_downloading()) {
-            continue;
-        }
-        if (terminal_owner_fd >= 0 && server != NULL) {
-            // Отправляем пинг
-            httpd_ws_frame_t ws_ping = {
-                .type = HTTPD_WS_TYPE_TEXT,
-                .payload = (uint8_t *)"ping",
-                .len = 4,
-            };
-            
-            xSemaphoreTake(ws_mutex, portMAX_DELAY);
-            esp_err_t ret = httpd_ws_send_frame_async(server, terminal_owner_fd, &ws_ping);
-            xSemaphoreGive(ws_mutex);
-            
-            if (ret == ESP_OK) {
-                terminal_last_ping = esp_timer_get_time() / 1000;
-            } else {
-                // Если не можем отправить пинг - соединение разорвано
-                terminal_owner_fd = -1;
-            }
-        }
-    }
-}
 
 /**
  * @brief Отправляет текстовое сообщение через WebSocket текущему владельцу терминала
@@ -85,7 +54,9 @@ void web_server_send(const char *json)
     if (ret != ESP_OK && ret != ESP_ERR_TIMEOUT) {
         ESP_LOGW(TAG, "ws_send_text failed, releasing terminal");
         terminal_owner_fd = -1;
-        /* НЕ останавливаем загрузку: HTTP-поток архива независим от WS. */
+        if (archive_manager_is_downloading()) {
+            archive_manager_stop_download();
+        }
     }
 }
 
@@ -190,15 +161,14 @@ static esp_err_t redirect_to_root(httpd_req_t *req, httpd_err_code_t err)
  *        Освобождает терминал и останавливает активную загрузку архива.
  */
 void web_server_client_disconnected(void)
-{   
-    if (archive_manager_is_downloading()) {
-        archive_manager_stop_download();
-        ESP_LOGI(TAG, "Download stopped due to client disconnect");
-    }
+{
     terminal_owner_fd  = -1;
     terminal_last_ping = 0;
-    /* НЕ останавливаем загрузку: HTTP-поток архива независим от WS. */
-    ESP_LOGI(TAG, "Terminal released (download continues)");
+    if (archive_manager_is_downloading()) {
+        archive_manager_stop_download();
+        ESP_LOGI(TAG, "Download stop requested due to client disconnect");
+    }
+    ESP_LOGI(TAG, "Terminal released");
 }
 
 /**
@@ -214,7 +184,7 @@ static esp_err_t ws_handler(httpd_req_t *req)
         int fd = httpd_req_to_sockfd(req);
         if (terminal_owner_fd != -1) {
             int64_t now = esp_timer_get_time() / 1000;
-            if ((now - terminal_last_ping) > 60000) {
+            if ((now - terminal_last_ping) > 15000) {
                 ESP_LOGW(TAG, "Owner timeout");
                 terminal_owner_fd = -1;
             }
@@ -249,32 +219,6 @@ static esp_err_t ws_handler(httpd_req_t *req)
     if (ret != ESP_OK) { free(frame.payload); return ret; }
     ((char *)frame.payload)[frame.len] = 0;
     const char *cmd = (const char *)frame.payload;
-
-    if (strcmp(cmd, "ping") == 0) {
-        int fd = httpd_req_to_sockfd(req);
-        if (fd == terminal_owner_fd) {
-            terminal_last_ping = esp_timer_get_time() / 1000;
-            // Отправляем pong
-            httpd_ws_frame_t ws_pong = {
-                .type = HTTPD_WS_TYPE_TEXT,
-                .payload = (uint8_t *)"pong",
-                .len = 4,
-            };
-            httpd_ws_send_frame_async(server, fd, &ws_pong);
-        }
-        free(frame.payload);
-        return ESP_OK;
-    }
-
-    if (strcmp(cmd, "pong") == 0) {
-        int fd = httpd_req_to_sockfd(req);
-        if (fd == terminal_owner_fd) {
-            terminal_last_ping = esp_timer_get_time() / 1000;
-        }
-        free(frame.payload);
-        return ESP_OK;
-    }
-
     // Добавь это перед обработкой сообщений
     if (terminal_owner_fd < 0) {
         free(frame.payload);
@@ -328,6 +272,15 @@ static esp_err_t ws_handler(httpd_req_t *req)
         return ESP_OK;
     }
 
+    if (strcmp(cmd, "ping") == 0) {
+        int fd = httpd_req_to_sockfd(req);
+        if (fd == terminal_owner_fd) {
+            terminal_last_ping = esp_timer_get_time() / 1000;
+        }
+        free(frame.payload);
+        return ESP_OK;
+    }
+
     const char *mapped = get_key_code(cmd);
     if (mapped != NULL) {
         terminal_send_command(1, mapped);
@@ -347,15 +300,13 @@ void web_server_send_binary(const uint8_t *data, size_t len)
 {
     if (server == NULL || terminal_owner_fd < 0) return;
     
-    // Если идет загрузка - отправляем без проверки ping
-    // Пинги обрабатываются в отдельной задаче
-    if (!archive_manager_is_downloading()) {
-        int64_t now = esp_timer_get_time() / 1000;
-        if ((now - terminal_last_ping) > 30000) { // Увеличили до 30 секунд
-            ESP_LOGW(TAG, "Owner timeout");
-            terminal_owner_fd = -1;
-            return;
-        }
+    if (archive_manager_is_downloading()) return;
+
+    int64_t now = esp_timer_get_time() / 1000;
+    if ((now - terminal_last_ping) > 15000) {
+        ESP_LOGW(TAG, "Owner timeout");
+        terminal_owner_fd = -1;
+        return;
     }
 
     httpd_ws_frame_t ws_pkt = {
@@ -373,7 +324,9 @@ void web_server_send_binary(const uint8_t *data, size_t len)
     if (ret != ESP_OK) {
         ESP_LOGW(TAG, "Owner disconnected");
         terminal_owner_fd = -1;
-        /* НЕ останавливаем загрузку: HTTP-поток архива независим от WS. */
+        if (archive_manager_is_downloading()) {
+            archive_manager_stop_download();
+        }
     }
 }
 
@@ -396,8 +349,8 @@ void web_server_start(void)
     config.send_wait_timeout    = 600;
     config.keep_alive_enable    = true;
     config.keep_alive_idle      = 600;
-    config.keep_alive_interval  = 60;    // Было 3
-    config.keep_alive_count     = 60;    // Было 3
+    config.keep_alive_interval  = 30;    // Было 3
+    config.keep_alive_count     = 30;    // Было 3
     config.max_uri_handlers     = 20;
     config.stack_size           = 16384; // Было 12288
 
@@ -427,17 +380,5 @@ void web_server_start(void)
     httpd_register_uri_handler(server, &(httpd_uri_t){ .uri = "/library/test/success.html", .method = HTTP_GET, .handler = root_get_handler });
 
     httpd_register_err_handler(server, HTTPD_404_NOT_FOUND, redirect_to_root);
-    
-    if (ws_ping_task_handle == NULL) {
-        xTaskCreatePinnedToCore(
-            ws_ping_task,
-            "ws_ping",
-            2048,
-            NULL,
-            5,  // Приоритет выше, чем у HTTP
-            &ws_ping_task_handle,
-            0
-        );
-    }
     ESP_LOGI("HTTP", "Captive portal enabled");
 }

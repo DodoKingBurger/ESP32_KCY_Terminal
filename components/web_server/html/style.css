@@ -10,7 +10,15 @@ html, body {
 body {
     display: flex;
     flex-direction: column;
-    height: 100vh;
+    height: 100dvh; /* Используем dvh вместо vh */
+    height: 100svh; /* fallback для старых браузеров */
+    overflow: hidden;
+    position: fixed; /* Фиксируем body, чтобы избежать прокрутки */
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    width: 100%;
 }
 /* --- Верхняя панель --- */
 .topbar {
