@@ -31,6 +31,7 @@ void archive_manager_init(void);
 
 /* Обработчик HTTP GET /download, отдающий собранный архив чанками */
 esp_err_t archive_manager_http_download_handler(httpd_req_t *req);
+esp_err_t archive_manager_http_stop_handler(httpd_req_t *req);
 
 /* Обработка входящих JSON-команд от ws_handler */
 void archive_manager_on_ws_command(const char *cmd);

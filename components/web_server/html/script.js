@@ -508,8 +508,8 @@ async function startHttpFetch() {
     receivedBytes = 0;
     downloadChunks = [];
 
-    // Закрываем WS на время скачивания (SoftAP)
-    closeWebSocketForDownload();
+    // WS оставляем открытым: stop уходит по WS, нет гонки сокетов SoftAP.
+    // (Раньше close WS + abort HTTP ломали httpd → ERR_CONNECTION_RESET.)
 
     downloadController = new AbortController();
 
@@ -523,12 +523,21 @@ async function startHttpFetch() {
 
     try {
         console.log('Starting HTTP fetch: /download');
-        const res = await fetch('/download', {
+        let res = await fetch('/download', {
             cache: 'no-store',
             signal: downloadController.signal
         });
 
         console.log('HTTP response:', res.status, res.statusText);
+        if (res.status === 503) {
+            console.warn('Server busy (503), retry in 2s...');
+            await new Promise(r => setTimeout(r, 2000));
+            res = await fetch('/download', {
+                cache: 'no-store',
+                signal: downloadController.signal
+            });
+            console.log('HTTP retry response:', res.status, res.statusText);
+        }
         if (!res.ok) throw new Error('HTTP ' + res.status);
         if (!res.body) throw new Error('No response body');
 
@@ -601,15 +610,22 @@ async function startHttpFetch() {
         }
         const btnDownload = document.getElementById('btn-download');
         const btnStop = document.getElementById('btn-stop');
-        if (btnDownload) btnDownload.disabled = false;
         if (btnStop) btnStop.disabled = true;
+        /* Пауза: handler на ESP должен выйти из цикла и отпустить сокет */
+        if (btnDownload) btnDownload.disabled = true;
 
-        if (currentTab === 'terminal') {
-            connectWebSocket();
-        } else {
-            setStatus(false);
-            startArchiveSizePolling();
-        }
+        intentionalClose = false;
+        setTimeout(() => {
+            if (!ws || ws.readyState !== WebSocket.OPEN) {
+                connectWebSocket();
+            } else {
+                setStatus(true);
+            }
+            if (btnDownload) btnDownload.disabled = false;
+            if (currentTab === 'downloads' && !isDownloading) {
+                startArchiveSizePolling();
+            }
+        }, 2000);
     }
 }
 
@@ -617,15 +633,21 @@ function stopDownload() {
     console.log('Stop download requested');
     if (!downloadAbortReason) downloadAbortReason = 'user';
 
-    if (downloadController) {
-        downloadController.abort();
-    }
-
+    /* 1) WS stop — handler увидит флаг на следующей итерации */
     if (ws && ws.readyState === WebSocket.OPEN) {
         try {
             ws.send(JSON.stringify({ action: 'stopDownload' }));
         } catch (e) {}
-        if (terminalActive) term.writeln('\x1b[33mОстановка запрошена\x1b[0m');
+    }
+    /* 2) HTTP stop — запасной канал */
+    try {
+        fetch('/stop-download', { method: 'POST', cache: 'no-store' }).catch(function () {});
+    } catch (e) {}
+
+    /* 3) Обрыв тела /download */
+    if (downloadController) {
+        try { downloadController.abort(); } catch (e) {}
+        downloadController = null;
     }
 
     startDownloadRequested = false;

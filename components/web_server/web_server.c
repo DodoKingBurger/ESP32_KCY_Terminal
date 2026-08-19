@@ -383,14 +383,10 @@ void web_server_start(void)
     config.server_port          = 80;
     config.max_open_sockets     = 7;
     config.lru_purge_enable     = true;
-    // Таймауты увеличены: при медленном Modbus + SoftAP 5 с мало,
-    // httpd_resp_send_chunk падал и обрывал скачивание ~на 1 МБ
-    config.recv_wait_timeout    = 60;
-    config.send_wait_timeout    = 60;
-    config.keep_alive_enable    = true;
-    config.keep_alive_idle      = 30;
-    config.keep_alive_interval  = 10;
-    config.keep_alive_count     = 5;
+    /* send timeout 5с: при abort быстро выходим; при медленном SoftAP ещё терпимо */
+    config.recv_wait_timeout    = 10;
+    config.send_wait_timeout    = 5;
+    config.keep_alive_enable    = false;
     config.max_uri_handlers     = 20;
     config.stack_size           = 12288;
 
@@ -403,6 +399,16 @@ void web_server_start(void)
         .uri = "/download",  
         .method = HTTP_GET, 
         .handler = archive_manager_http_download_handler 
+    });
+    httpd_register_uri_handler(server, &(httpd_uri_t){
+        .uri = "/stop-download",
+        .method = HTTP_GET,
+        .handler = archive_manager_http_stop_handler
+    });
+    httpd_register_uri_handler(server, &(httpd_uri_t){
+        .uri = "/stop-download",
+        .method = HTTP_POST,
+        .handler = archive_manager_http_stop_handler
     });
 
     httpd_register_uri_handler(server, &(httpd_uri_t){ .uri = "/style.css", .method = HTTP_GET, .handler = style_css_handler });
