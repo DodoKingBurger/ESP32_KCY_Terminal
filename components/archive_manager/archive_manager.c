@@ -1,4 +1,5 @@
-﻿#include "archive_manager.h"
+
+#include "archive_manager.h"
 #include "web_server.h"
 #include "modbus_master.h"
 
@@ -26,16 +27,24 @@ bool download_in_progress = false;
 volatile bool download_stop_requested = false;
 
 static uint32_t total_size = 0;
+
 static uint32_t downloaded = 0;
 static char archive_name[256] = "archive.bin";
 static SemaphoreHandle_t archive_mutex = NULL;
 static bool name_extracted = false;
-static httpd_handle_t current_download_req = NULL;
+static httpd_req_t *current_download_req = NULL;
 
 /* ===== ОЧЕРЕДЬ ===== */
 static QueueHandle_t send_queue = NULL;
 static SemaphoreHandle_t queue_mutex = NULL;
 static TaskHandle_t send_task_handle = NULL;
+
+static void send_browser_log(char *msg)
+{
+    char log_msg[256];
+    snprintf(log_msg, sizeof(log_msg), "{\"type\":\"log\",\"msg\":\"%s\"}", msg);
+    web_server_send(log_msg);
+}
 
 /* ===== ЗАДАЧА ОТПРАВКИ ===== */
 static void archive_manager_send_task(void *pvParameters)
@@ -45,15 +54,20 @@ static void archive_manager_send_task(void *pvParameters)
     while (1) {
         if (xQueueReceive(send_queue, &item, portMAX_DELAY) == pdTRUE) {
             if (current_download_req != NULL) {
-                httpd_req_t *req = (httpd_req_t *)current_download_req;
-                esp_err_t ret = httpd_resp_send_chunk(req, (const char *)item.data, item.len);
-                
-                if (ret != ESP_OK) {
-                    ESP_LOGW(TAG, "Send failed: %d", ret);
-                    download_stop_requested = true;
+                for (int i = 1; i<=MAX_RETRIES; i++){
+                    esp_err_t ret = httpd_resp_send_chunk(current_download_req,
+                                                          (const char *)item.data, item.len);
+                    if (ret == ESP_OK) {
+                        break;
+                    } else if (i==MAX_RETRIES){
+                        send_browser_log("Send failed");
+                        download_stop_requested = true;
+                    }
+                    else
+                        continue;
                 }
             }
-            vTaskDelay(pdMS_TO_TICKS(1));
+            vTaskDelay(pdMS_TO_TICKS(2));
         }
     }
 }
@@ -70,9 +84,9 @@ static bool enqueue_chunk(const uint8_t *data, uint16_t len, uint32_t offset)
     item.offset = offset;
     
     if (xQueueSend(send_queue, &item, pdMS_TO_TICKS(100)) != pdTRUE) {
-        ESP_LOGW(TAG, "Queue full, retrying...");
+        send_browser_log("Queue full, retrying...");
         if (xQueueSend(send_queue, &item, pdMS_TO_TICKS(1000)) != pdTRUE) {
-            ESP_LOGE(TAG, "Failed to enqueue chunk");
+            send_browser_log("Failed to enqueue chunk");
             return false;
         }
     }
@@ -122,49 +136,75 @@ void archive_manager_stop_download(void)
     download_stop_requested = true;
     
     if (current_download_req != NULL) {
-        httpd_req_t *req = (httpd_req_t *)current_download_req;
-        httpd_resp_send_chunk(req, NULL, 0);
+        // Завершаем chunked-ответ, чтобы клиент получил то, что уже ушло
+        httpd_resp_send_chunk(current_download_req, NULL, 0);
         current_download_req = NULL;
     }
 }
 
-static void send_browser_log(const char *msg)
+/* Percent-encode UTF-8 for Content-Disposition filename* / X-File-Name */
+static void url_encode(const char *src, char *dst, size_t dst_size)
 {
-    char log_msg[256];
-    snprintf(log_msg, sizeof(log_msg), "{\"type\":\"log\",\"msg\":\"%s\"}", msg);
-    web_server_send(log_msg);
+    static const char *hex = "0123456789ABCDEF";
+    size_t j = 0;
+    for (size_t i = 0; src[i] && j + 4 < dst_size; i++) {
+        unsigned char c = (unsigned char)src[i];
+        if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+            (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' || c == '~') {
+            dst[j++] = (char)c;
+        } else if (c == ' ') {
+            dst[j++] = '%';
+            dst[j++] = '2';
+            dst[j++] = '0';
+        } else {
+            dst[j++] = '%';
+            dst[j++] = hex[c >> 4];
+            dst[j++] = hex[c & 0x0F];
+        }
+    }
+    dst[j] = '\0';
 }
 
-/* ===== ИЗВЛЕЧЕНИЕ ИМЕНИ ===== */
+/* ===== ИЗВЛЕЧЕНИЕ ИМЕНИ из первых 132 байт архива ===== */
 static void extract_filename(uint8_t *data, uint16_t *len)
 {
     if (*len < HEADER_SIZE) return;
-    
-    char utf8_name[256] = {0};
 
     char decoded_name[256] = {0};
     int i = 0;
     while (i < HEADER_SIZE - HEADER_SPEC_SIZE && (HEADER_SPEC_SIZE + i) < *len) {
-        decoded_name[i] = data[HEADER_SPEC_SIZE + i];
+        decoded_name[i] = (char)data[HEADER_SPEC_SIZE + i];
         i++;
     }
     decoded_name[i] = '\0';
-                
+
+    /* Обрезаем по первому нулю / управляющему символу */
+    for (int k = 0; k < i; k++) {
+        if ((unsigned char)decoded_name[k] < 0x20) {
+            decoded_name[k] = '\0';
+            break;
+        }
+    }
+
     if (decoded_name[0] == '_' || decoded_name[0] == '/') {
         memmove(decoded_name, decoded_name + 1, strlen(decoded_name));
+    }
+    /* Убрать path-сепараторы из имени */
+    for (char *p = decoded_name; *p; p++) {
+        if (*p == '/' || *p == '\\') *p = '_';
     }
     if (strlen(decoded_name) == 0) {
         strcpy(decoded_name, "archive");
     }
-                
+
     time_t now;
     struct tm timeinfo;
     time(&now);
     localtime_r(&now, &timeinfo);
-                
+
     char final_name[300];
     char *ext = strrchr(decoded_name, '.');
-    if (ext) {
+    if (ext && ext != decoded_name) {
         int base_len = (int)(ext - decoded_name);
         snprintf(final_name, sizeof(final_name),
             "%.*s %d_%d_%d %dч%02dм%02dс%s",
@@ -187,18 +227,17 @@ static void extract_filename(uint8_t *data, uint16_t *len)
             timeinfo.tm_min,
             timeinfo.tm_sec);
     }
-                
-    strncpy(utf8_name, final_name, sizeof(utf8_name) - 1);
-    utf8_name[sizeof(utf8_name) - 1] = 0;
-                
+
+    strncpy(archive_name, final_name, sizeof(archive_name) - 1);
+    archive_name[sizeof(archive_name) - 1] = 0;
+
+    /* WS (если ещё открыт) — для совместимости */
     char name_msg[500];
     snprintf(name_msg, sizeof(name_msg),
-        "{\"type\":\"fileName\",\"name\":\"%s\"}", utf8_name);
+        "{\"type\":\"fileName\",\"name\":\"%s\"}", archive_name);
     web_server_send(name_msg);
 
-    strncpy(archive_name, utf8_name, sizeof(archive_name) - 1);
-    archive_name[sizeof(archive_name) - 1] = 0;
-                
+    /* Срезаем служебный заголовок архива — в HTTP уходит только полезная нагрузка */
     if (*len > HEADER_SIZE) {
         memmove(data, data + HEADER_SIZE, *len - HEADER_SIZE);
         *len -= HEADER_SIZE;
@@ -226,24 +265,20 @@ esp_err_t archive_manager_http_download_handler(httpd_req_t *req)
     download_stop_requested = false;
     downloaded = 0;
     name_extracted = false;
-    archive_name[0] = '\0';
+    strncpy(archive_name, "archive.bin", sizeof(archive_name) - 1);
+    archive_name[sizeof(archive_name) - 1] = 0;
     current_download_req = req;
 
-    // Заголовки
-    httpd_resp_set_type(req, "application/octet-stream");
-    httpd_resp_set_hdr(req, "Cache-Control", "no-store, no-cache, must-revalidate");
-    httpd_resp_set_hdr(req, "Pragma", "no-cache");
-    httpd_resp_set_hdr(req, "Transfer-Encoding", "chunked");
-    httpd_resp_set_hdr(req, "Connection", "keep-alive");
-
-    // Размер архива
-    char size_msg[80];
-    snprintf(size_msg, sizeof(size_msg),
-             "{\"type\":\"archiveSize\",\"size\":%lu}",
-             (unsigned long)total_size);
-    web_server_send(size_msg);
-
     send_browser_log("Starting archive download");
+
+    /* Размер — по WS (если ещё открыт); клиент также знает его до старта */
+    {
+        char size_msg[80];
+        snprintf(size_msg, sizeof(size_msg),
+                 "{\"type\":\"archiveSize\",\"size\":%lu}",
+                 (unsigned long)total_size);
+        web_server_send(size_msg);
+    }
 
     uint8_t chunk[CHUNK_SIZE + 4];
     uint16_t chunk_len = 0;
@@ -251,47 +286,105 @@ esp_err_t archive_manager_http_download_handler(httpd_req_t *req)
     bool stop_download = false;
     int chunk_counter = 0;
     bool data_sent = false;
+    bool headers_sent = false;
+
+    /* --- Первый чанк: извлекаем имя ДО отправки HTTP-заголовков --- */
+    {
+
+        modbus_status_t status = MODBUS_ERR;
+        for (int i = 0; i < MAX_RETRIES; i++) {
+            status = modbus_read_file_0x64(1, 0, CHUNK_SIZE, chunk, &chunk_len);
+            if (status == MODBUS_OK || status == MODBUS_END_OF_FILE)
+                break;
+            char log_buf[128];
+            snprintf(log_buf, sizeof(log_buf), "First-chunk read error %d/%d, status=%d",
+                     i + 1, MAX_RETRIES, status);
+            send_browser_log(log_buf);
+            vTaskDelay(pdMS_TO_TICKS(200));
+        }
+
+        if (status != MODBUS_OK || chunk_len == 0) {
+            send_browser_log("Failed to read first chunk");
+            httpd_resp_set_status(req, "500 Internal Server Error");
+            httpd_resp_sendstr(req, "Failed to read archive");
+            download_in_progress = false;
+            current_download_req = NULL;
+            return ESP_OK;
+        }
+
+        if (chunk_len >= HEADER_SIZE) {
+            extract_filename(chunk, &chunk_len);
+            name_extracted = true;
+        }
+
+        /* HTTP-заголовки (chunked, без Content-Length) */
+        httpd_resp_set_type(req, "application/octet-stream");
+        httpd_resp_set_hdr(req, "Cache-Control", "no-store, no-cache, must-revalidate");
+        httpd_resp_set_hdr(req, "Pragma", "no-cache");
+        httpd_resp_set_hdr(req, "Connection", "keep-alive");
+
+        /* Имя файла: Content-Disposition + X-File-Name (URL-encoded UTF-8).
+           Клиент читает из ответа — WS на время скачивания закрыт. */
+        {
+            char encoded[900];
+            url_encode(archive_name, encoded, sizeof(encoded));
+
+            static char disp[1024];
+            snprintf(disp, sizeof(disp),
+                     "attachment; filename=\"archive.bin\"; filename*=UTF-8''%s",
+                     encoded);
+            httpd_resp_set_hdr(req, "Content-Disposition", disp);
+
+            static char xname[900];
+            snprintf(xname, sizeof(xname), "%s", encoded);
+            httpd_resp_set_hdr(req, "X-File-Name", xname);
+        }
+        headers_sent = true;
+
+        /* Первый (уже без 132-байтного заголовка) чанк в очередь */
+        if (chunk_len > 0) {
+            if (!enqueue_chunk(chunk, chunk_len, 0)) {
+                send_browser_log("Failed to enqueue first chunk");
+                stop_download = true;
+            } else {
+                data_sent = true;
+                downloaded += chunk_len;
+                chunk_counter = 1;
+            }
+        }
+        offset = CHUNK_SIZE;
+    }
 
     while (!download_stop_requested && downloaded < total_size && !stop_download) {
+        /* HTTP-скачивание не зависит от WebSocket. */
         modbus_status_t status;
-        for(int i = 0; i < MAX_RETRIES; i++){
+        for (int i = 0; i < MAX_RETRIES; i++) {
             status = modbus_read_file_0x64(1, offset, CHUNK_SIZE, chunk, &chunk_len);
-            if(status == MODBUS_OK || status == MODBUS_END_OF_FILE)
-                break;  
-            else{
-                char log_buf[128];
-                snprintf(log_buf, sizeof(log_buf), "Read error %d/%d, status=%d", 
-                        i, MAX_RETRIES, status);
-                send_browser_log(log_buf);
-                vTaskDelay(pdMS_TO_TICKS(200));
-            }
+            if (status == MODBUS_OK || status == MODBUS_END_OF_FILE)
+                break;
+            char log_buf[128];
+            snprintf(log_buf, sizeof(log_buf), "Read error %d/%d, status=%d",
+                     i + 1, MAX_RETRIES, status);
+            send_browser_log(log_buf);
+            vTaskDelay(pdMS_TO_TICKS(200));
         }
         if (status == MODBUS_END_OF_FILE) {
             send_browser_log("End of file reached");
             break;
         }
-        
+
         if (status == MODBUS_OK && chunk_len > 0) {
-            
-            // Извлечение имени
-            if (!name_extracted && offset == 0 && chunk_len >= HEADER_SIZE) {
-                extract_filename(chunk, &chunk_len);
-                name_extracted = true;
-            }
-            
-            // Добавляем в очередь
             if (!enqueue_chunk(chunk, chunk_len, offset)) {
                 send_browser_log("Failed to enqueue chunk, stopping");
                 stop_download = true;
                 break;
             }
 
-            data_sent = true; 
+            data_sent = true;
             offset += CHUNK_SIZE;
             downloaded += chunk_len;
             chunk_counter++;
-            
-            // Прогресс каждые 5 чанков
+
             if (chunk_counter % 5 == 0) {
                 char progress_msg[256];
                 snprintf(progress_msg, sizeof(progress_msg),
@@ -300,26 +393,26 @@ esp_err_t archive_manager_http_download_handler(httpd_req_t *req)
                         (float)downloaded / total_size * 100.0f);
                 web_server_send(progress_msg);
             }
-            
-            // Проверка очереди
+
             UBaseType_t queue_space = uxQueueSpacesAvailable(send_queue);
             if (queue_space < 5) {
-                vTaskDelay(pdMS_TO_TICKS(10));
+                vTaskDelay(pdMS_TO_TICKS(100));
             } else {
-                vTaskDelay(pdMS_TO_TICKS(1));
+                vTaskDelay(pdMS_TO_TICKS(10));
             }
 
             if (downloaded >= total_size) {
                 send_browser_log("All data read");
                 break;
             }
-            
         } else {
             send_browser_log("Too many errors, stopping");
             stop_download = true;
             break;
         }
     }
+
+    (void)headers_sent;
 
     // Ждём опустошения очереди
     send_browser_log("Waiting for queue to empty...");
@@ -386,7 +479,8 @@ void archive_manager_on_ws_command(const char *cmd)
 {
     if (cmd == NULL) return;
 
-    if (strstr(cmd, "\"action\":\"getArchiveSize\"")) {
+    if (strstr(cmd, "\"getArchiveSize\"") || strstr(cmd, "\"getArchiveInfo\"") ||
+        strstr(cmd, "\"action\":\"getArchiveSize\"")) {
         uint32_t size = 0;
         if (modbus_read_archive_size(1, &size)) {
             char resp[80];
@@ -400,7 +494,8 @@ void archive_manager_on_ws_command(const char *cmd)
         return;
     }
 
-    if (strstr(cmd, "\"action\":\"startDownload\"")) {
+    // Поддерживаем оба формата: "type":"..." и "action":"..."
+    if (strstr(cmd, "\"startDownload\"") || strstr(cmd, "\"action\":\"startDownload\"")) {
         if (download_in_progress) {
             web_server_send("{\"type\":\"error\",\"msg\":\"Download already in progress\"}");
             return;
@@ -409,7 +504,7 @@ void archive_manager_on_ws_command(const char *cmd)
         return;
     }
 
-    if (strstr(cmd, "\"action\":\"stopDownload\"")) {
+    if (strstr(cmd, "\"stopDownload\"") || strstr(cmd, "\"action\":\"stopDownload\"")) {
         if (download_in_progress) {
             download_stop_requested = true;
             web_server_send("{\"type\":\"log\",\"msg\":\"Download stopped by user\"}");

@@ -209,6 +209,12 @@ void modbus_poll_task(void *arg) {
     char json[1024];
 
     while (1) {
+
+        if (!web_client_connected && !archive_manager_is_downloading()) {
+            vTaskDelay(pdMS_TO_TICKS(100));
+            continue;
+        }
+
         // 1. Чтение времени (3 регистра)
         if (modbus_read_registers(1, 0x00FA, 3, time_regs) != MODBUS_OK) {
             ESP_LOGW(TAG, "Failed to read time registers");
@@ -354,7 +360,7 @@ static void terminal_task(void *arg)
     while (1)
     {
         // Если идёт загрузка, пропускаем опрос экрана
-        if (load_page_active || download_in_progress) {
+        if (load_page_active || download_in_progress || !web_client_connected) {
             vTaskDelay(pdMS_TO_TICKS(100));
             continue;
         }

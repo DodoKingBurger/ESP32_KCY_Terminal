@@ -45,8 +45,8 @@ void app_main(void)
     ESP_LOGI(TAG, "WiFi started");
 
     // 5. Запуск DNS
-    dns_server_start();
-    ESP_LOGI(TAG, "DNS started");
+    //dns_server_start();
+    //ESP_LOGI(TAG, "DNS started");
 
     // 6. Запуск веб-сервера
     web_server_start();

@@ -6,6 +6,7 @@
 
 extern bool load_page_active;
 extern bool download_in_progress;
+extern bool web_client_connected;
 extern volatile bool download_stop_requested;
 
 void web_server_start(void);

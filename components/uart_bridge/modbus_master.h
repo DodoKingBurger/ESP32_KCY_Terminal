@@ -9,7 +9,8 @@ typedef enum
     MODBUS_OK = 0,
     MODBUS_ERR_TIMEOUT = -1,
     MODBUS_ERR_CRC = -2,
-    MODBUS_ERR_UART = -3
+    MODBUS_ERR_UART = -3,
+    MODBUS_ERR
 } modbus_status_t;
 
 modbus_status_t modbus_read_holding(
