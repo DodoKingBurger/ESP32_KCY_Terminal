@@ -22,6 +22,7 @@
 <div class="tabs">
     <button class="tab active" onclick="showTab('terminal')">Терминал</button>
     <button class="tab" onclick="showTab('downloads')">Загрузки</button>
+    <button class="tab" onclick="showTab('firmware')">Перепрошивка</button>
 </div>
 
 <!-- Страница терминала -->
@@ -104,6 +105,53 @@
             <span class="value" id="elapsed">00:00</span>
             <span class="label">Скорость:</span>
             <span class="value" id="speed">0 байт/с</span>
+        </div>
+    </div>
+</div>
+
+
+<!-- Страница перепрошивки -->
+<div id="firmware-page" class="page">
+    <div class="download-panel firmware-panel">
+        <div class="download-row">
+            <label>Версия прошивки (UART):</label>
+            <span id="fw-version" class="value">—</span>
+            <button type="button" id="btn-fw-refresh-ver" class="btn-secondary" onclick="requestFirmwareVersion()">Обновить</button>
+        </div>
+
+        <div class="download-row fw-file-row">
+            <label>Файл прошивки:</label>
+            <input type="file" id="fw-file-input" accept=".bin,.hex,.irz,.fw,*/*" hidden />
+            <button type="button" id="btn-fw-choose" class="btn-secondary" onclick="document.getElementById('fw-file-input').click()">Выбрать файл</button>
+        </div>
+
+        <div class="download-row">
+            <label>Имя файла:</label>
+            <span id="fw-file-name" class="value">—</span>
+        </div>
+
+        <div class="download-row">
+            <label>Размер файла:</label>
+            <span id="fw-file-size" class="value">—</span>
+        </div>
+
+        <div class="download-actions">
+            <button id="btn-fw-upload" class="btn-start-download" onclick="uploadFirmware()" disabled>Отправить на UART</button>
+            <button id="btn-fw-reflash" class="btn-reflash" onclick="startReflash()" disabled>Перепрошить</button>
+        </div>
+
+        <div class="progress-container">
+            <div id="fw-progress-bar" class="progress-bar" style="width:0%;"></div>
+            <div id="fw-progress-text" class="progress-text">0%</div>
+        </div>
+
+        <div class="download-info">
+            <span class="label">Отправлено:</span>
+            <span class="value" id="fw-sent-bytes">0</span>
+            <span class="label">Всего:</span>
+            <span class="value" id="fw-total-bytes">0</span>
+            <span class="label">Статус:</span>
+            <span class="value" id="fw-status">ожидание</span>
         </div>
     </div>
 </div>

@@ -49,6 +49,7 @@ body {
     flex-shrink: 0;
 }
 .dot.connected { background: #00ff88; }
+.dot.downloading { background: #ffaa00; box-shadow: 0 0 6px #ffaa00; }
 
 /* --- Вкладки --- */
 .tabs {
@@ -423,4 +424,47 @@ body {
         gap: 2px 8px;
         padding: 4px 2px;
     }
+}
+/* ============================================================ */
+/* === ВКЛАДКА ПЕРЕПРОШИВКИ === */
+/* ============================================================ */
+.firmware-panel input[type="file"] {
+    color: #00ff88;
+    font-family: Consolas, monospace;
+    font-size: 14px;
+    max-width: 100%;
+}
+.btn-secondary {
+    padding: 8px 16px;
+    background: #1e293b;
+    color: #00ff88;
+    border: 1px solid #334155;
+    border-radius: 4px;
+    cursor: pointer;
+    font-family: Consolas, monospace;
+    font-size: 14px;
+}
+.btn-secondary:active { background: #334155; }
+.btn-reflash {
+    background: #b45309;
+    color: white;
+    border: 1px solid #d97706;
+    box-shadow: 0 0 16px rgba(217, 119, 6, 0.35);
+    padding: 14px 32px;
+    border: none;
+    border-radius: 6px;
+    cursor: pointer;
+    font-family: Consolas, monospace;
+    font-size: 18px;
+    font-weight: bold;
+}
+.btn-reflash:disabled {
+    background: #555;
+    border-color: #555;
+    box-shadow: none;
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+.tab {
+    font-size: 12px;
 }

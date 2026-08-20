@@ -1,5 +1,9 @@
 #include "modbus_master.h"
+#include "modbus_poll.h"
 #include "web_server.h"
+#include "uart_bridge.h"
+#include "mbcrc.h"
+#include <string.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -211,28 +215,28 @@ void modbus_poll_task(void *arg) {
     while (1) {
 
         if (!web_client_connected && !archive_manager_is_downloading()) {
-            vTaskDelay(pdMS_TO_TICKS(100));
+            vTaskDelay(pdMS_TO_TICKS(250));
             continue;
         }
 
         // 1. Чтение времени (3 регистра)
         if (modbus_read_registers(1, 0x00FA, 3, time_regs) != MODBUS_OK) {
             ESP_LOGW(TAG, "Failed to read time registers");
-            vTaskDelay(pdMS_TO_TICKS(500));
+            vTaskDelay(pdMS_TO_TICKS(200));
             continue;
         }
 
         // 2. Чтение состояния СУ (1 регистр)
         if (modbus_read_registers(1, 0x00FF, 1, &status) != MODBUS_OK) {
             ESP_LOGW(TAG, "Failed to read status register");
-            vTaskDelay(pdMS_TO_TICKS(500));
+            vTaskDelay(pdMS_TO_TICKS(200));
             continue;
         }
 
         // 3. Чтение параметров (16 регистров: 0x0101 … 0x0110)
         if (modbus_read_registers(1, 0x0101, 16, params) != MODBUS_OK) {
             ESP_LOGW(TAG, "Failed to read parameter registers");
-            vTaskDelay(pdMS_TO_TICKS(500));
+            vTaskDelay(pdMS_TO_TICKS(200));
             continue;
         }
 
@@ -342,7 +346,7 @@ void modbus_poll_task(void *arg) {
         web_server_send(json);
         ESP_LOGI(TAG, "%s", json);
 
-        vTaskDelay(pdMS_TO_TICKS(1000));
+        vTaskDelay(pdMS_TO_TICKS(500));
     }
 }
 
@@ -361,7 +365,7 @@ static void terminal_task(void *arg)
     {
         // Если идёт загрузка, пропускаем опрос экрана
         if (load_page_active || download_in_progress || !web_client_connected) {
-            vTaskDelay(pdMS_TO_TICKS(100));
+            vTaskDelay(pdMS_TO_TICKS(50));
             continue;
         }
         bool ok =
@@ -375,7 +379,8 @@ static void terminal_task(void *arg)
             web_server_send_binary(screen, screen_len);
         }
 
-        vTaskDelay(pdMS_TO_TICKS(100));
+        /* ~5 кадр/с — достаточно для UI, UART не забиваем */
+        vTaskDelay(pdMS_TO_TICKS(200));
     }
 }
 
@@ -392,4 +397,175 @@ void terminal_task_start(void)
         5,
         NULL
     );
+}
+
+/* ======================================================================
+ * Терминал: чтение экрана (0x64 file 11), команды клавиш (0x65), map key codes
+ * ====================================================================== */
+/**
+ * @brief Чтение экрана терминала через функцию 0x64 (файл 11, размер 2000)
+ * @param slave_id   адрес ведомого
+ * @param screen     буфер для принятых данных (ANSI-текст)
+ * @param screen_len указатель для сохранения длины полученных данных
+ * @return true при успехе
+ */
+bool terminal_read_screen(
+    uint8_t slave_id,
+    uint8_t *screen,
+    uint16_t *screen_len
+)
+{
+    if (screen == NULL || screen_len == NULL) {
+        return false;
+    }
+    *screen_len = 0;
+
+    uint8_t request[16];
+    int pos = 0;
+
+    request[pos++] = slave_id;
+    request[pos++] = 0x64;
+    /* FILE = 11 */
+    request[pos++] = 0x00;
+    request[pos++] = 0x0B;
+    /* OFFSET = 0 */
+    request[pos++] = 0x00;
+    request[pos++] = 0x00;
+    request[pos++] = 0x00;
+    request[pos++] = 0x00;
+    /* SIZE = 2000 */
+    request[pos++] = 0x00;
+    request[pos++] = 0x00;
+    request[pos++] = 0x07;
+    request[pos++] = 0xD0;
+    mbcrc_insert_crc(request, pos);
+    pos += 2;
+
+    /* Атомарный TX+RX; timeout в миллисекундах (не ticks!) */
+    uint8_t response[2100];
+    int len = uart_bridge_transact(
+        request, (size_t)pos,
+        response, sizeof(response),
+        400
+    );
+
+    if (len <= 0) {
+        ESP_LOGW(TAG, "terminal_read_screen: no response");
+        return false;
+    }
+
+    /* data after: slave+func+file+offset+size = 12, CRC at end */
+    const int data_offset = 12;
+    int data_len = len - data_offset - 2;
+    if (data_len <= 0) {
+        ESP_LOGW(TAG, "terminal_read_screen: bad len=%d", len);
+        return false;
+    }
+    if ((size_t)data_len > 4096) {
+        data_len = 4096;
+    }
+
+    memcpy(screen, &response[data_offset], (size_t)data_len);
+    *screen_len = (uint16_t)data_len;
+    return true;
+}
+
+/*
+========================================================
+SEND COMMAND
+Function 0x65
+========================================================
+*/
+/**
+ * @brief Отправка команды клавиши в терминал через функцию 0x65 (запись в файл 11)
+ * @param slave_id  адрес ведомого
+ * @param key_code  строка с escape-последовательностью (например, "\x1b[A")
+ * @return true при успехе
+ */
+bool terminal_send_command(uint8_t slave_id,  const char *key_code) {
+    uint16_t data_len = strlen(key_code);
+    if (data_len == 0 || data_len > 252) {
+        ESP_LOGE("TERMINAL", "Invalid data length: %d", data_len);
+        return false;
+    }
+
+    uint8_t request[32 + data_len];
+    int pos = 0;
+
+    request[pos++] = slave_id;
+    request[pos++] = 0x65;                           // функция записи в файл
+
+    // FILE = 11 (терминал)
+    request[pos++] = 0x00;
+    request[pos++] = 0x0B;
+
+    // OFFSET = 0
+    request[pos++] = 0x00;
+    request[pos++] = 0x00;
+    request[pos++] = 0x00;
+    request[pos++] = 0x00;
+
+    // SIZE = data_len (4 байта, big-endian)
+    request[pos++] = (data_len >> 24) & 0xFF;
+    request[pos++] = (data_len >> 16) & 0xFF;
+    request[pos++] = (data_len >> 8) & 0xFF;
+    request[pos++] = data_len & 0xFF;
+
+    // Копируем данные (без нулевого терминатора)
+    memcpy(&request[pos], key_code, data_len);
+    pos += data_len;
+
+    // CRC
+    mbcrc_insert_crc(request, pos);
+    pos += 2;
+
+    uint8_t response[32];
+    int len = uart_bridge_transact(request, (size_t)pos, response, sizeof(response), 300);
+    if (len <= 0) {
+        ESP_LOGE("TERMINAL", "No response to command 0x65");
+        return false;
+    }
+
+    // Проверка CRC
+    if (!mbcrc_is_valid(response, len)) {
+        ESP_LOGE("TERMINAL", "CRC error in response");
+        return false;
+    }
+
+    // Проверка кода функции
+    if (response[1] != 0x65) {
+        ESP_LOGE("TERMINAL", "Unexpected function code: 0x%02X", response[1]);
+        return false;
+    }
+
+    // Проверка размера данных (должен быть 2)
+    uint32_t resp_size = (response[8] << 24) | (response[9] << 16) | (response[10] << 8) | response[11];
+    if (resp_size != 2) {
+        ESP_LOGE("TERMINAL", "Wrong data size: %u", resp_size);
+        return false;
+    }
+
+    //ESP_LOGI("TERMINAL", "Command 0x65 succeeded for key 0x%04X", key_code);
+    return true;
+}
+
+/**
+ * @brief Преобразует символьное имя клавиши (f1, up, enter) в escape-последовательность
+ * @param cmd  строка-идентификатор (f1, up, enter и т.д.)
+ * @return указатель на константную строку с escape-последовательностью или NULL
+ */
+const char*  get_key_code(const char *cmd)
+{
+    if (strcmp(cmd, "f1") == 0)      return "\x1b[11~";
+    if (strcmp(cmd, "f2") == 0)      return "\x1b[12~";
+    if (strcmp(cmd, "f3") == 0)      return "\x1b[13~";
+    if (strcmp(cmd, "up") == 0)      return "\x1b[A";
+    if (strcmp(cmd, "down") == 0)    return "\x1b[B";
+    if (strcmp(cmd, "left") == 0)    return "\x1b[D";
+    if (strcmp(cmd, "right") == 0)   return "\x1b[C";
+    if (strcmp(cmd, "enter") == 0)   return "\r";
+    if (strcmp(cmd, "esc") == 0)     return "q";  // два байта 0x12 0x34
+    if (strcmp(cmd, "start") == 0)   return "5";
+    if (strcmp(cmd, "stop") == 0)    return "6";
+    return NULL;
 }

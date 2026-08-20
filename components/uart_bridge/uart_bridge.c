@@ -127,3 +127,63 @@ int uart_bridge_receive(
     xSemaphoreGive(uart_mutex);
     return ret;
 }
+
+/**
+ * Modbus RTU-приём:
+ *  - ждём первый байт до timeout_ms
+ *  - дальше копим данные с коротким inter-byte timeout
+ * Иначе uart_read_bytes(rx_max=4096) ждёт полный timeout на КАЖДОМ кадре.
+ */
+#ifndef UART_INTERBYTE_MS
+#define UART_INTERBYTE_MS 15
+#endif
+
+int uart_bridge_transact(
+    const uint8_t *tx,
+    size_t tx_len,
+    uint8_t *rx,
+    size_t rx_max,
+    uint32_t timeout_ms
+)
+{
+    if (uart_mutex == NULL || tx == NULL || rx == NULL || tx_len == 0 || rx_max == 0) {
+        return -1;
+    }
+
+    xSemaphoreTake(uart_mutex, portMAX_DELAY);
+
+    uart_flush(UART_PORT);
+
+    int written = uart_write_bytes(UART_PORT, tx, tx_len);
+    if (written != (int)tx_len) {
+        xSemaphoreGive(uart_mutex);
+        return -1;
+    }
+
+    uart_wait_tx_done(UART_PORT, pdMS_TO_TICKS(50));
+
+    /* 1) Первый байт — до timeout_ms */
+    int n = uart_read_bytes(UART_PORT, rx, 1, pdMS_TO_TICKS(timeout_ms));
+    if (n <= 0) {
+        xSemaphoreGive(uart_mutex);
+        return 0;
+    }
+    int total = n;
+
+    /* 2) Остаток кадра — короткие паузы между байтами */
+    while ((size_t)total < rx_max) {
+        n = uart_read_bytes(
+            UART_PORT,
+            rx + total,
+            rx_max - (size_t)total,
+            pdMS_TO_TICKS(UART_INTERBYTE_MS)
+        );
+        if (n <= 0) {
+            break; /* тишина = конец кадра */
+        }
+        total += n;
+    }
+
+    xSemaphoreGive(uart_mutex);
+    return total;
+}

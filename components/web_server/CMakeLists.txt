@@ -8,6 +8,7 @@
         "html/node_modules/xterm/lib/xterm.js"
         "html/node_modules/xterm/css/xterm.css"
     REQUIRES
+        firmware_manager
         esp_timer
         esp_http_server
         esp_wifi

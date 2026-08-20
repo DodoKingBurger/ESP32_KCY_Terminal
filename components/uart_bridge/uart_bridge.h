@@ -31,3 +31,21 @@ int uart_bridge_receive(
     size_t max_len,
     uint32_t timeout_ms
 );
+
+/**
+ * @brief Атомарный обмен: flush + TX + wait TX + RX под одним mutex.
+ *        Не даёт другим задачам перехватить ответ между send и receive.
+ * @param tx           запрос
+ * @param tx_len       длина запроса
+ * @param rx           буфер ответа
+ * @param rx_max       размер буфера
+ * @param timeout_ms   таймаут приёма, миллисекунды (НЕ ticks!)
+ * @return число принятых байт, или -1 при ошибке отправки
+ */
+int uart_bridge_transact(
+    const uint8_t *tx,
+    size_t tx_len,
+    uint8_t *rx,
+    size_t rx_max,
+    uint32_t timeout_ms
+);

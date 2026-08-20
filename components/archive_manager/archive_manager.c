@@ -1,4 +1,3 @@
-
 #include "archive_manager.h"
 #include "web_server.h"
 #include "modbus_master.h"
@@ -246,7 +245,6 @@ esp_err_t archive_manager_http_download_handler(httpd_req_t *req)
     uint16_t chunk_len = 0;
     uint32_t offset = 0;
     bool aborted = false;
-    bool body_started = false;
     int chunk_counter = 0;
 
     /* Первый чанк */
@@ -293,7 +291,6 @@ esp_err_t archive_manager_http_download_handler(httpd_req_t *req)
         httpd_resp_set_hdr(req, "X-File-Name", xname);
 
         if (chunk_len > 0) {
-            body_started = true;
             if (!send_chunk_to_client(req, (const char *)chunk, chunk_len)) {
                 aborted = true;
             } else {

@@ -5,13 +5,15 @@
 
 typedef enum
 {
-    MODBUS_END_OF_FILE = 1,   // <-- конец файла (не ошибка)
+    MODBUS_END_OF_FILE = 1,
     MODBUS_OK = 0,
     MODBUS_ERR_TIMEOUT = -1,
     MODBUS_ERR_CRC = -2,
     MODBUS_ERR_UART = -3,
-    MODBUS_ERR
+    MODBUS_ERR = -4
 } modbus_status_t;
+
+/* ---- Общие Modbus-функции (holding / input / file / archive) ---- */
 
 modbus_status_t modbus_read_holding(
     uint8_t slave,
@@ -36,26 +38,24 @@ modbus_status_t modbus_read_registers(
     uint16_t *values
 );
 
+/** Holding registers (FC 0x03), распаковка в uint16_t[] */
+modbus_status_t modbus_read_holding_registers(
+    uint8_t slave,
+    uint16_t start_reg,
+    uint16_t count,
+    uint16_t *values
+);
+
 modbus_status_t modbus_write_single_register(
     uint8_t slave,
     uint16_t reg,
     uint16_t value
 );
 
-bool terminal_read_screen(
-    uint8_t slave_id,
-    uint8_t *screen,
-    uint16_t *screen_len
-);
-
-bool terminal_send_command(uint8_t slave_id,  
-    const char *key_code);
-
-const char* get_key_code(const char *cmd);
-
-modbus_status_t modbus_read_file_0x64(uint8_t slave, uint32_t offset, 
+modbus_status_t modbus_read_file_0x64(uint8_t slave, uint32_t offset,
     uint32_t size, uint8_t *out, uint16_t *out_len);
-modbus_status_t modbus_read_file_0x14(uint8_t slave, uint16_t file_id, 
+
+modbus_status_t modbus_read_file_0x14(uint8_t slave, uint16_t file_id,
     uint16_t record_number, uint8_t *out, uint16_t *out_len);
+
 bool modbus_read_archive_size(uint8_t slave, uint32_t *size);
-// ===================================

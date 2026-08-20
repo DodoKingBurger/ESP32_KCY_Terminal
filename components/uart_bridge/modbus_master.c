@@ -2,13 +2,11 @@
 
 #include "uart_bridge.h"
 #include "mbcrc.h"
-#include "web_server.h"
 #include "esp_log.h"
 
 #include <string.h>
 
 #define MODBUS_TIMEOUT_MS 200
-static const char *TAG = "MODBUS_POLL";
 /*
 ====================================================
 BUILD REQUEST
@@ -63,24 +61,19 @@ static modbus_status_t execute_request(
     uint16_t *response_len
 )
 {
-    int written =
-        uart_bridge_send(
-            request,
-            request_len
-        );
-
-    if (written != request_len)
-    {
-        return MODBUS_ERR_UART;
-    }
-
     int len =
-        uart_bridge_receive(
+        uart_bridge_transact(
+            request,
+            request_len,
             response,
             256,
             MODBUS_TIMEOUT_MS
         );
 
+    if (len < 0)
+    {
+        return MODBUS_ERR_UART;
+    }
     if (len <= 0)
     {
         return MODBUS_ERR_TIMEOUT;
@@ -226,6 +219,31 @@ modbus_status_t modbus_read_registers(
 }
 
 /**
+ * @brief Чтение holding-регистров (0x03) с распаковкой в uint16_t[]
+ */
+modbus_status_t modbus_read_holding_registers(
+    uint8_t slave,
+    uint16_t start_reg,
+    uint16_t count,
+    uint16_t *values
+) {
+    uint8_t request[8];
+    build_request(slave, 0x03, start_reg, count, request);
+
+    uint8_t response[256];
+    uint16_t resp_len = 0;
+    modbus_status_t status = execute_request(request, sizeof(request), response, &resp_len);
+    if (status != MODBUS_OK) return status;
+
+    if (resp_len < 3 || response[2] != count * 2) return MODBUS_ERR_UART;
+
+    for (int i = 0; i < count; i++) {
+        values[i] = (response[3 + i*2] << 8) | response[4 + i*2];
+    }
+    return MODBUS_OK;
+}
+
+/**
  * @brief Запись одного регистра (функция 0x06)
  */
 modbus_status_t modbus_write_single_register(
@@ -267,242 +285,6 @@ Offset 0
 Size 2000
 ========================================================
 */
-/**
- * @brief Чтение экрана терминала через функцию 0x64 (файл 11, размер 2000)
- * @param slave_id   адрес ведомого
- * @param screen     буфер для принятых данных (ANSI-текст)
- * @param screen_len указатель для сохранения длины полученных данных
- * @return true при успехе
- */
-bool terminal_read_screen(
-    uint8_t slave_id,
-    uint8_t *screen,
-    uint16_t *screen_len
-)
-{
-    uint8_t request[32];
-
-    int pos = 0;
-
-    request[pos++] = slave_id;
-    request[pos++] = 0x64;
-
-    /*
-    FILE NUMBER = 11
-    */
-
-    request[pos++] = 0x00;
-    request[pos++] = 0x0B;
-
-    /*
-    OFFSET = 0
-    */
-
-    request[pos++] = 0x00;
-    request[pos++] = 0x00;
-    request[pos++] = 0x00;
-    request[pos++] = 0x00;
-
-    /*
-    SIZE = 2000 bytes
-    */
-
-    request[pos++] = 0x00;
-    request[pos++] = 0x00;
-    request[pos++] = 0x07;
-    request[pos++] = 0xD0;
-
-    /*
-    CRC
-    */
-
-    uint16_t crc =
-        modbus_crc16(request, pos);
-
-    request[pos++] = crc & 0xFF;
-    request[pos++] = crc >> 8;
-
-    /*
-    SEND REQUEST
-    */
-
-    uart_bridge_send(
-        request,
-        pos
-    );
-
-    /*
-    RECEIVE RESPONSE
-    */
-
-    uint8_t response[4096];
-
-    int len =
-        uart_bridge_receive(
-            response,
-            sizeof(response),
-            pdMS_TO_TICKS(1000)
-        );
-
-    if (len <= 0)
-    {
-        ESP_LOGW(TAG, "No response");
-
-        return false;
-    }
-
-    /*
-    MINIMAL CHECK
-    */
-
-    if (false && response[1] != 0x64)
-    {
-        ESP_LOGW(TAG, "Invalid function");
-
-        return false;
-    }
-
-    /*
-    DATA STARTS AFTER:
-    slave + func + file + offset + size
-
-    1 + 1 + 2 + 4 + 4 = 12
-    */
-
-    int data_offset = 12;
-
-    /*
-    CRC = last 2 bytes
-    */
-
-    int data_len =
-        len - data_offset - 2;
-
-    if (data_len <= 0)
-    {
-        ESP_LOGW(TAG, "Invalid data len");
-
-        return false;
-    }
-
-    memcpy(
-        screen,
-        &response[data_offset],
-        data_len
-    );
-
-    *screen_len = data_len;
-
-    return true;
-}
-
-/*
-========================================================
-SEND COMMAND
-Function 0x65
-========================================================
-*/
-/**
- * @brief Отправка команды клавиши в терминал через функцию 0x65 (запись в файл 11)
- * @param slave_id  адрес ведомого
- * @param key_code  строка с escape-последовательностью (например, "\x1b[A")
- * @return true при успехе
- */
-bool terminal_send_command(uint8_t slave_id,  const char *key_code) {
-    uint16_t data_len = strlen(key_code);
-    if (data_len == 0 || data_len > 252) {
-        ESP_LOGE("TERMINAL", "Invalid data length: %d", data_len);
-        return false;
-    }
-
-    uint8_t request[32 + data_len];
-    int pos = 0;
-
-    request[pos++] = slave_id;
-    request[pos++] = 0x65;                           // функция записи в файл
-
-    // FILE = 11 (терминал)
-    request[pos++] = 0x00;
-    request[pos++] = 0x0B;
-
-    // OFFSET = 0
-    request[pos++] = 0x00;
-    request[pos++] = 0x00;
-    request[pos++] = 0x00;
-    request[pos++] = 0x00;
-
-    // SIZE = data_len (4 байта, big-endian)
-    request[pos++] = (data_len >> 24) & 0xFF;
-    request[pos++] = (data_len >> 16) & 0xFF;
-    request[pos++] = (data_len >> 8) & 0xFF;
-    request[pos++] = data_len & 0xFF;
-
-    // Копируем данные (без нулевого терминатора)
-    memcpy(&request[pos], key_code, data_len);
-    pos += data_len;
-
-    // CRC
-    mbcrc_insert_crc(request, pos);
-    pos += 2;
-
-    // Отправка
-    int written = uart_bridge_send(request, pos);
-    if (written != pos) {
-        ESP_LOGE("TERMINAL", "Send failed for %d bytes", data_len);
-        return false;
-    }
-
-    // Чтение ответа с таймаутом 300 мс
-    uint8_t response[32];
-    int len = uart_bridge_receive(response, sizeof(response), 200);
-    if (len <= 0) {
-        ESP_LOGE("TERMINAL", "No response to command 0x65");
-        return false;
-    }
-
-    // Проверка CRC
-    if (!mbcrc_is_valid(response, len)) {
-        ESP_LOGE("TERMINAL", "CRC error in response");
-        return false;
-    }
-
-    // Проверка кода функции
-    if (response[1] != 0x65) {
-        ESP_LOGE("TERMINAL", "Unexpected function code: 0x%02X", response[1]);
-        return false;
-    }
-
-    // Проверка размера данных (должен быть 2)
-    uint32_t resp_size = (response[8] << 24) | (response[9] << 16) | (response[10] << 8) | response[11];
-    if (resp_size != 2) {
-        ESP_LOGE("TERMINAL", "Wrong data size: %u", resp_size);
-        return false;
-    }
-
-    //ESP_LOGI("TERMINAL", "Command 0x65 succeeded for key 0x%04X", key_code);
-    return true;
-}
-
-/**
- * @brief Преобразует символьное имя клавиши (f1, up, enter) в escape-последовательность
- * @param cmd  строка-идентификатор (f1, up, enter и т.д.)
- * @return указатель на константную строку с escape-последовательностью или NULL
- */
-const char*  get_key_code(const char *cmd)
-{
-    if (strcmp(cmd, "f1") == 0)      return "\x1b[11~";
-    if (strcmp(cmd, "f2") == 0)      return "\x1b[12~";
-    if (strcmp(cmd, "f3") == 0)      return "\x1b[13~";
-    if (strcmp(cmd, "up") == 0)      return "\x1b[A";
-    if (strcmp(cmd, "down") == 0)    return "\x1b[B";
-    if (strcmp(cmd, "left") == 0)    return "\x1b[D";
-    if (strcmp(cmd, "right") == 0)   return "\x1b[C";
-    if (strcmp(cmd, "enter") == 0)   return "\r";
-    if (strcmp(cmd, "esc") == 0)     return "q";  // два байта 0x12 0x34
-    if (strcmp(cmd, "start") == 0)   return "5";
-    if (strcmp(cmd, "stop") == 0)    return "6";
-    return NULL;
-}
 
 /**
  * @brief Чтение файла через функцию 0x64 (произвольное чтение)
@@ -525,7 +307,6 @@ const char*  get_key_code(const char *cmd)
 modbus_status_t modbus_read_file_0x64(uint8_t slave, uint32_t offset, 
     uint32_t size, uint8_t *out, uint16_t *out_len)
 {   
-    char diag_msg[256];
     if (size > 2048) {
         return MODBUS_ERR_UART;
     }
@@ -552,13 +333,11 @@ modbus_status_t modbus_read_file_0x64(uint8_t slave, uint32_t offset,
     request[pos++] = crc & 0xFF;
     request[pos++] = crc >> 8;
 
-    int written = uart_bridge_send(request, pos);
-    if (written != pos) {
+    uint8_t response[4096];
+    int len = uart_bridge_transact(request, (size_t)pos, response, sizeof(response), 500);
+    if (len < 0) {
         return MODBUS_ERR_UART;
     }
-
-    uint8_t response[4096];
-    int len = uart_bridge_receive(response, sizeof(response), pdMS_TO_TICKS(500));
 
     if (len <= 0) {
         return MODBUS_ERR_TIMEOUT;
@@ -626,14 +405,12 @@ modbus_status_t modbus_read_file_0x14(uint8_t slave, uint16_t file_id, uint16_t 
     request[pos++] = crc & 0xFF;
     request[pos++] = (crc >> 8) & 0xFF;
 
-    int written = uart_bridge_send(request, pos);
-    if (written != pos) {
+    uint8_t response[256];
+    int len = uart_bridge_transact(request, (size_t)pos, response, sizeof(response), 3000);
+    if (len < 0) {
         ESP_LOGE("MODBUS", "0x14 send failed");
         return MODBUS_ERR_UART;
     }
-
-    uint8_t response[256];
-    int len = uart_bridge_receive(response, sizeof(response), pdMS_TO_TICKS(3000));
     if (len <= 0) {
         ESP_LOGE("MODBUS", "0x14 timeout");
         return MODBUS_ERR_TIMEOUT;

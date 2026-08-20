@@ -46,6 +46,12 @@ let downloadInterval = null;
 let archiveSizeTimer = null;
 let startDownloadRequested = false;
 
+// -------------------- Firmware --------------------
+let fwSelectedFile = null;
+let fwUploadInProgress = false;
+let fwFileReady = false;
+
+
 // -------------------- Утилиты --------------------
 function formatBytes(bytes) {
     if (bytes < 1024) return bytes + ' байт';
@@ -178,6 +184,7 @@ function connectWebSocket() {
     ws.onopen = () => {
         console.log('WebSocket connected');
         setStatus(true);
+        updateFirmwareButtons();
 
         setTimeout(() => {
             const now = new Date();
@@ -196,10 +203,21 @@ function connectWebSocket() {
             }
         }, 500);
 
-        const isDownload = (currentTab === 'downloads');
+        /* active:true = пауза кадров терминала (load_page_active на ESP) */
+        const pauseTerminal = (currentTab === 'downloads' || currentTab === 'firmware');
         try {
-            ws.send(JSON.stringify({ action: 'setTerminalActive', active: isDownload }));
-            ws.send(JSON.stringify({ action: 'getArchiveSize' }));
+            ws.send(JSON.stringify({ action: 'setTerminalActive', active: pauseTerminal }));
+            if (currentTab === 'downloads') {
+                ws.send(JSON.stringify({ action: 'getArchiveSize' }));
+            }
+            if (currentTab === 'firmware') {
+                /* версия после реконнекта — WS уже OPEN */
+                setTimeout(() => {
+                    if (currentTab === 'firmware' && ws && ws.readyState === WebSocket.OPEN) {
+                        requestFirmwareVersion();
+                    }
+                }, 100);
+            }
         } catch (e) {}
     };
 
@@ -283,6 +301,38 @@ function connectWebSocket() {
                 // сервер закончил — UI уже сбросится в finally fetch
                 break;
 
+            case 'firmwareVersion':
+                {
+                    const el = document.getElementById('fw-version');
+                    if (el) el.textContent = msg.version || '—';
+                    setFwStatus('версия получена');
+                }
+                break;
+
+            case 'firmwareUploadStart':
+                setFwStatus('отправка…');
+                break;
+
+            case 'firmwareProgress':
+                updateFwProgress(msg.received || 0, msg.total || 0);
+                break;
+
+            case 'firmwareUploadComplete':
+                setFwStatus('файл отправлен');
+                fwFileReady = true;
+                updateFirmwareButtons();
+                break;
+
+            case 'firmwareUploadError':
+                setFwStatus('ошибка отправки');
+                fwFileReady = false;
+                updateFirmwareButtons();
+                break;
+
+            case 'reflashStarted':
+                setFwStatus('команда перепрошивки отправлена');
+                break;
+
             case 'error':
                 console.error('Server error:', msg.msg);
                 break;
@@ -339,28 +389,57 @@ function showTab(name) {
     currentTab = name;
     document.querySelectorAll('.page').forEach(x => x.classList.remove('active'));
     document.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
-    document.getElementById(name + '-page').classList.add('active');
-    const tabs = document.querySelectorAll('.tab');
-    if (name === 'terminal') tabs[0].classList.add('active');
-    else tabs[1].classList.add('active');
+    const page = document.getElementById(name + '-page');
+    if (page) page.classList.add('active');
+    document.querySelectorAll('.tab').forEach(btn => {
+        if (btn.getAttribute('onclick') && btn.getAttribute('onclick').indexOf("'" + name + "'") >= 0) {
+            btn.classList.add('active');
+        }
+    });
 
-    if (ws && ws.readyState === WebSocket.OPEN) {
-        const isDownload = (name === 'downloads');
-        try {
-            ws.send(JSON.stringify({ action: 'setTerminalActive', active: isDownload }));
-        } catch (e) {}
-    }
+    stopArchiveSizePolling();
 
     if (name === 'terminal') {
         terminalActive = true;
-        stopArchiveSizePolling();
         if (!isDownloading) {
-            if (!ws || ws.readyState !== WebSocket.OPEN) connectWebSocket();
+            if (!ws || ws.readyState !== WebSocket.OPEN) {
+                connectWebSocket();
+            } else {
+                /* Снять паузу кадров — иначе после «Загрузки» экран молчит */
+                try {
+                    ws.send(JSON.stringify({ action: 'setTerminalActive', active: false }));
+                } catch (e) {}
+                setStatus(true);
+            }
         }
         setTimeout(resizeTerminal, 50);
+    } else if (name === 'downloads') {
+        terminalActive = false;
+        if (ws && ws.readyState === WebSocket.OPEN) {
+            try {
+                ws.send(JSON.stringify({ action: 'setTerminalActive', active: true }));
+            } catch (e) {}
+        } else if (!isDownloading) {
+            connectWebSocket();
+        }
+        startArchiveSizePolling();
+    } else if (name === 'firmware') {
+        terminalActive = false;
+        if (ws && ws.readyState === WebSocket.OPEN) {
+            try {
+                ws.send(JSON.stringify({ action: 'setTerminalActive', active: true }));
+            } catch (e) {}
+            requestFirmwareVersion();
+        } else if (!isDownloading) {
+            /* onopen сам запросит версию, когда WS поднимется */
+            connectWebSocket();
+            setFwStatus('подключение…');
+        } else {
+            setFwStatus('идёт скачивание — дождитесь');
+        }
+        updateFirmwareButtons();
     } else {
         terminalActive = false;
-        startArchiveSizePolling();
     }
 }
 
@@ -377,7 +456,7 @@ function startArchiveSizePolling() {
     const page = document.getElementById('downloads-page');
     if (!page || !page.classList.contains('active') || isDownloading) return;
     requestArchiveSize();
-    archiveSizeTimer = setInterval(requestArchiveSize, 5000);
+    archiveSizeTimer = setInterval(requestArchiveSize, 15000);
 }
 
 function stopArchiveSizePolling() {
@@ -620,6 +699,15 @@ async function startHttpFetch() {
                 connectWebSocket();
             } else {
                 setStatus(true);
+                /* После скачивания явно восстановить режим вкладки:
+                   иначе load_page_active мог остаться true и терминал «молчит». */
+                const pause = (currentTab === 'downloads' || currentTab === 'firmware');
+                try {
+                    ws.send(JSON.stringify({ action: 'setTerminalActive', active: pause }));
+                } catch (e) {}
+                if (currentTab === 'firmware') {
+                    requestFirmwareVersion();
+                }
             }
             if (btnDownload) btnDownload.disabled = false;
             if (currentTab === 'downloads' && !isDownloading) {
@@ -682,6 +770,9 @@ document.addEventListener('DOMContentLoaded', () => {
     term.writeln('ESP32 Terminal');
     term.writeln('');
     connectWebSocket();
+    const fwInput = document.getElementById('fw-file-input');
+    if (fwInput) fwInput.addEventListener('change', onFirmwareFileSelected);
+    updateFirmwareButtons();
     window.addEventListener('resize', resizeTerminal);
     if (window.ResizeObserver && container) {
         const ro = new ResizeObserver(resizeTerminal);
@@ -696,7 +787,150 @@ window.addEventListener('beforeunload', () => {
     }
 });
 
+
+// -------------------- Перепрошивка --------------------
+function setFwStatus(text) {
+    const el = document.getElementById('fw-status');
+    if (el) el.textContent = text;
+}
+
+function updateFwProgress(received, total) {
+    const pct = total > 0 ? Math.min(100, (received / total) * 100) : 0;
+    const bar = document.getElementById('fw-progress-bar');
+    const txt = document.getElementById('fw-progress-text');
+    const sent = document.getElementById('fw-sent-bytes');
+    const tot = document.getElementById('fw-total-bytes');
+    if (bar) bar.style.width = pct + '%';
+    if (txt) txt.textContent = Math.round(pct) + '%';
+    if (sent) sent.textContent = typeof formatBytes === 'function' ? formatBytes(received) : received;
+    if (tot) tot.textContent = typeof formatBytes === 'function' ? formatBytes(total) : total;
+}
+
+function updateFirmwareButtons() {
+    const btnUp = document.getElementById('btn-fw-upload');
+    const btnRf = document.getElementById('btn-fw-reflash');
+    const wsOk = !!(ws && ws.readyState === WebSocket.OPEN);
+    /* Отправка: файл выбран и size > 0 */
+    const canUpload = !!(fwSelectedFile && fwSelectedFile.size > 0 && !fwUploadInProgress);
+    if (btnUp) btnUp.disabled = !canUpload;
+    /* Перепрошивка: WS есть, не идёт upload (файл на устройстве желателен, но команда — отдельно) */
+    if (btnRf) btnRf.disabled = !wsOk || fwUploadInProgress;
+}
+
+function requestFirmwareVersion() {
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+        setFwStatus('нет WS');
+        return;
+    }
+    try {
+        ws.send(JSON.stringify({ action: 'getFirmwareVersion' }));
+        setFwStatus('запрос версии…');
+    } catch (e) {}
+}
+
+function onFirmwareFileSelected(ev) {
+    const input = ev.target;
+    const f = input.files && input.files[0] ? input.files[0] : null;
+    fwSelectedFile = f;
+    fwFileReady = false;
+    const nameEl = document.getElementById('fw-file-name');
+    const sizeEl = document.getElementById('fw-file-size');
+    const chooseBtn = document.getElementById('btn-fw-choose');
+    if (!f) {
+        if (nameEl) nameEl.textContent = '—';
+        if (sizeEl) sizeEl.textContent = '—';
+        if (chooseBtn) chooseBtn.textContent = 'Выбрать файл';
+        updateFwProgress(0, 0);
+        setFwStatus('файл не выбран');
+    } else {
+        if (nameEl) nameEl.textContent = f.name;
+        if (sizeEl) sizeEl.textContent = (typeof formatBytes === 'function' ? formatBytes(f.size) : f.size + ' байт') +
+            ' (' + f.size + ')';
+        if (chooseBtn) chooseBtn.textContent = 'Сменить файл';
+        updateFwProgress(0, f.size);
+        setFwStatus('файл выбран');
+    }
+    updateFirmwareButtons();
+}
+
+/** POST /firmware с прогрессом (XHR) → ESP пишет куски в UART (firmware_manager) */
+function uploadFirmware() {
+    if (!fwSelectedFile || fwSelectedFile.size <= 0 || fwUploadInProgress) return;
+    fwUploadInProgress = true;
+    fwFileReady = false;
+    updateFirmwareButtons();
+    setFwStatus('отправка на устройство…');
+    updateFwProgress(0, fwSelectedFile.size);
+
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', '/firmware', true);
+    xhr.responseType = 'text';
+    xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+
+    xhr.upload.onprogress = function (ev) {
+        if (ev.lengthComputable) {
+            updateFwProgress(ev.loaded, ev.total || fwSelectedFile.size);
+        }
+    };
+
+    xhr.onload = function () {
+        fwUploadInProgress = false;
+        if (xhr.status >= 200 && xhr.status < 300) {
+            fwFileReady = true;
+            setFwStatus('файл отправлен');
+            updateFwProgress(fwSelectedFile.size, fwSelectedFile.size);
+        } else {
+            fwFileReady = false;
+            setFwStatus('ошибка HTTP ' + xhr.status);
+            alert('Не удалось отправить файл: HTTP ' + xhr.status);
+        }
+        updateFirmwareButtons();
+    };
+
+    xhr.onerror = function () {
+        fwUploadInProgress = false;
+        fwFileReady = false;
+        setFwStatus('ошибка сети');
+        alert('Не удалось отправить файл (сеть)');
+        updateFirmwareButtons();
+    };
+
+    xhr.onabort = function () {
+        fwUploadInProgress = false;
+        fwFileReady = false;
+        setFwStatus('отправка отменена');
+        updateFirmwareButtons();
+    };
+
+    xhr.send(fwSelectedFile);
+}
+
+function startReflash() {
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+        alert('Нет соединения WebSocket');
+        return;
+    }
+    if (fwUploadInProgress) {
+        alert('Дождитесь окончания отправки файла');
+        return;
+    }
+    const hint = fwFileReady
+        ? 'Файл уже отправлен. Запустить перепрошивку?'
+        : 'Файл ещё не отправляли на устройство в этой сессии.\nВсё равно отправить команду перепрошивки по UART?';
+    if (!confirm(hint)) return;
+    try {
+        ws.send(JSON.stringify({ action: 'startReflash' }));
+        setFwStatus('команда перепрошивки…');
+    } catch (e) {
+        alert('Ошибка отправки команды');
+    }
+}
+
+
 window.showTab = showTab;
 window.sendKey = sendKey;
 window.startDownload = startDownload;
 window.stopDownload = stopDownload;
+window.requestFirmwareVersion = requestFirmwareVersion;
+window.uploadFirmware = uploadFirmware;
+window.startReflash = startReflash;

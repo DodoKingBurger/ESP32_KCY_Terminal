@@ -1,7 +1,8 @@
-
 #include "web_server.h"
 #include "modbus_master.h"
+#include "modbus_poll.h"
 #include "archive_manager.h"
+#include "firmware_manager.h"
 #include "esp_http_server.h"
 #include "esp_log.h"
 #include <string.h>
@@ -324,8 +325,12 @@ static esp_err_t ws_handler(httpd_req_t *req)
             free(frame.payload);
             return ESP_OK;
         }
-        // ===== ИСПОЛЬЗУЕМ archive_manager_on_ws_command =====
-        archive_manager_on_ws_command(cmd);
+        // archive / firmware WS commands
+        if (strstr(cmd, "Firmware") || strstr(cmd, "Reflash") || strstr(cmd, "firmware") || strstr(cmd, "reflash")) {
+            firmware_manager_on_ws_command(cmd);
+        } else {
+            archive_manager_on_ws_command(cmd);
+        }
         free(frame.payload);
         return ESP_OK;
     }
@@ -378,15 +383,19 @@ void web_server_start(void)
     
     // ===== ИНИЦИАЛИЗИРУЕМ archive_manager =====
     archive_manager_init();
+    firmware_manager_init();
 
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port          = 80;
     config.max_open_sockets     = 7;
     config.lru_purge_enable     = true;
-    /* send timeout 5с: при abort быстро выходим; при медленном SoftAP ещё терпимо */
-    config.recv_wait_timeout    = 10;
+    /* Как в стабильной версии + чуть мягче abort */
+    config.recv_wait_timeout    = 5;
     config.send_wait_timeout    = 5;
-    config.keep_alive_enable    = false;
+    config.keep_alive_enable    = true;
+    config.keep_alive_idle      = 5;
+    config.keep_alive_interval  = 3;
+    config.keep_alive_count     = 3;
     config.max_uri_handlers     = 20;
     config.stack_size           = 12288;
 
@@ -409,6 +418,11 @@ void web_server_start(void)
         .uri = "/stop-download",
         .method = HTTP_POST,
         .handler = archive_manager_http_stop_handler
+    });
+    httpd_register_uri_handler(server, &(httpd_uri_t){
+        .uri = "/firmware",
+        .method = HTTP_POST,
+        .handler = firmware_manager_http_upload_handler
     });
 
     httpd_register_uri_handler(server, &(httpd_uri_t){ .uri = "/style.css", .method = HTTP_GET, .handler = style_css_handler });
