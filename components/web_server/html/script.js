@@ -45,6 +45,13 @@ const PROGRESS_UPDATE_INTERVAL = 100;
 let downloadInterval = null;
 let archiveSizeTimer = null;
 let startDownloadRequested = false;
+/* После долгого HTTP-download SoftAP часто оставляет WS «полуживым»
+   (readyState=OPEN, а кадры/команды уже не доходят). Нужен reconnect.
+   Флаг липкий: снимается только после успешного onopen на вкладке «Терминал»
+   (или после первого binary-кадра). Auto-reconnect на downloads его НЕ сбрасывает. */
+let needsWsRefresh = false;
+let terminalFrameWatchdog = null;
+let terminalReconnectAttempts = 0;
 
 // -------------------- Firmware --------------------
 let fwSelectedFile = null;
@@ -218,6 +225,11 @@ function connectWebSocket() {
                     }
                 }, 100);
             }
+            if (currentTab === 'terminal') {
+                /* Снимаем sticky только когда реально на терминале.
+                   Auto-reconnect после download (на downloads) флаг НЕ трогает. */
+                startTerminalFrameWatchdog();
+            }
         } catch (e) {}
     };
 
@@ -225,7 +237,12 @@ function connectWebSocket() {
         console.log('WebSocket closed');
         const wasIntentional = intentionalClose;
         ws = null;
-        if (!wasIntentional && !isDownloading) {
+        if (isDownloading) {
+            /* Во время длинного download SoftAP может уронить WS — reconnect после */
+            needsWsRefresh = true;
+            return;
+        }
+        if (!wasIntentional) {
             setStatus(false);
             scheduleReconnect();
         }
@@ -239,6 +256,13 @@ function connectWebSocket() {
     ws.onmessage = (event) => {
         // ===== БИНАРНЫЙ КАДР ЭКРАНА (оригинал) =====
         if (event.data instanceof ArrayBuffer) {
+            /* Живой поток кадров — SoftAP/WS восстановлены */
+            if (needsWsRefresh) needsWsRefresh = false;
+            terminalReconnectAttempts = 0;
+            if (terminalFrameWatchdog) {
+                clearTimeout(terminalFrameWatchdog);
+                terminalFrameWatchdog = null;
+            }
             writeTerminalScreen(event.data);
             return;
         }
@@ -353,6 +377,60 @@ function scheduleReconnect() {
     }, 2500);
 }
 
+/**
+ * Принудительный reconnect: закрыть текущий fd на ESP и поднять новый.
+ * Нужен после длинного /download — иначе setTerminalActive и binary-кадры
+ * могут молча теряться при «зомби» WS.
+ * needsWsRefresh здесь НЕ сбрасываем — только onopen на terminal / первый кадр.
+ */
+function forceReconnectWebSocket(reason) {
+    if (isDownloading) return;
+    console.log('Force WS reconnect:', reason || '', 'needsRefresh=', needsWsRefresh);
+    if (reconnectTimer) {
+        clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+    }
+    if (terminalFrameWatchdog) {
+        clearTimeout(terminalFrameWatchdog);
+        terminalFrameWatchdog = null;
+    }
+    intentionalClose = true;
+    if (ws) {
+        try { ws.close(1000, reason || 'reconnect'); } catch (e) {}
+        ws = null;
+    }
+    setStatus(false);
+    setTimeout(() => {
+        intentionalClose = false;
+        connectWebSocket();
+    }, 600);
+}
+
+/**
+ * После setTerminalActive(false) ждём binary-кадр. Если тишина — зомби WS,
+ * ещё один force-reconnect (ограничено attempts).
+ */
+function startTerminalFrameWatchdog() {
+    if (terminalFrameWatchdog) {
+        clearTimeout(terminalFrameWatchdog);
+        terminalFrameWatchdog = null;
+    }
+    if (currentTab !== 'terminal' || isDownloading) return;
+    terminalFrameWatchdog = setTimeout(() => {
+        terminalFrameWatchdog = null;
+        if (currentTab !== 'terminal' || isDownloading) return;
+        if (terminalReconnectAttempts >= 3) {
+            console.warn('Terminal frames still missing after reconnects');
+            setStatus(false);
+            return;
+        }
+        terminalReconnectAttempts++;
+        console.warn('No terminal frames — force reconnect #', terminalReconnectAttempts);
+        needsWsRefresh = true;
+        forceReconnectWebSocket('no-frames-watchdog');
+    }, 3500);
+}
+
 function closeWebSocketForDownload() {
     intentionalClose = true;
     if (reconnectTimer) {
@@ -398,24 +476,34 @@ function showTab(name) {
     });
 
     stopArchiveSizePolling();
+    if (name !== 'terminal' && terminalFrameWatchdog) {
+        clearTimeout(terminalFrameWatchdog);
+        terminalFrameWatchdog = null;
+    }
 
     if (name === 'terminal') {
         terminalActive = true;
         if (!isDownloading) {
-            if (!ws || ws.readyState !== WebSocket.OPEN) {
-                connectWebSocket();
+            if (needsWsRefresh || !ws || ws.readyState !== WebSocket.OPEN) {
+                /* После полного download (особенно ~10+ мин) WS часто зомби:
+                   readyState=OPEN, а setTerminalActive/binary уже не доходят.
+                   Флаг needsWsRefresh липкий до первого кадра / onopen terminal. */
+                forceReconnectWebSocket(needsWsRefresh ? 'post-download-tab' : 'terminal-tab');
             } else {
                 /* Снять паузу кадров — иначе после «Загрузки» экран молчит */
                 try {
                     ws.send(JSON.stringify({ action: 'setTerminalActive', active: false }));
                 } catch (e) {}
                 setStatus(true);
+                startTerminalFrameWatchdog();
             }
         }
         setTimeout(resizeTerminal, 50);
     } else if (name === 'downloads') {
         terminalActive = false;
-        if (ws && ws.readyState === WebSocket.OPEN) {
+        if (needsWsRefresh) {
+            forceReconnectWebSocket('post-download-downloads');
+        } else if (ws && ws.readyState === WebSocket.OPEN) {
             try {
                 ws.send(JSON.stringify({ action: 'setTerminalActive', active: true }));
             } catch (e) {}
@@ -425,7 +513,10 @@ function showTab(name) {
         startArchiveSizePolling();
     } else if (name === 'firmware') {
         terminalActive = false;
-        if (ws && ws.readyState === WebSocket.OPEN) {
+        if (needsWsRefresh) {
+            forceReconnectWebSocket('post-download-firmware');
+            setFwStatus('подключение…');
+        } else if (ws && ws.readyState === WebSocket.OPEN) {
             try {
                 ws.send(JSON.stringify({ action: 'setTerminalActive', active: true }));
             } catch (e) {}
@@ -693,27 +784,20 @@ async function startHttpFetch() {
         /* Пауза: handler на ESP должен выйти из цикла и отпустить сокет */
         if (btnDownload) btnDownload.disabled = true;
 
+        /* Длинный /download на SoftAP часто «убивает» WS без onclose в браузере.
+           Всегда помечаем и делаем force-reconnect — иначе терминал молчит. */
+        needsWsRefresh = true;
         intentionalClose = false;
         setTimeout(() => {
-            if (!ws || ws.readyState !== WebSocket.OPEN) {
-                connectWebSocket();
-            } else {
-                setStatus(true);
-                /* После скачивания явно восстановить режим вкладки:
-                   иначе load_page_active мог остаться true и терминал «молчит». */
-                const pause = (currentTab === 'downloads' || currentTab === 'firmware');
-                try {
-                    ws.send(JSON.stringify({ action: 'setTerminalActive', active: pause }));
-                } catch (e) {}
-                if (currentTab === 'firmware') {
-                    requestFirmwareVersion();
-                }
-            }
             if (btnDownload) btnDownload.disabled = false;
-            if (currentTab === 'downloads' && !isDownloading) {
-                startArchiveSizePolling();
-            }
-        }, 2000);
+            /* Дать HTTP-handler'у на ESP выйти из цикла и отпустить сокет */
+            forceReconnectWebSocket('post-download');
+            setTimeout(() => {
+                if (currentTab === 'downloads' && !isDownloading) {
+                    startArchiveSizePolling();
+                }
+            }, 1000);
+        }, 1500);
     }
 }
 

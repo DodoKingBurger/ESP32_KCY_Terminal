@@ -1,3 +1,4 @@
+
 #include "archive_manager.h"
 #include "web_server.h"
 #include "modbus_master.h"
@@ -245,6 +246,7 @@ esp_err_t archive_manager_http_download_handler(httpd_req_t *req)
     uint16_t chunk_len = 0;
     uint32_t offset = 0;
     bool aborted = false;
+    
     int chunk_counter = 0;
 
     /* Первый чанк */
