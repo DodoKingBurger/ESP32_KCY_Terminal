@@ -45,10 +45,6 @@ const PROGRESS_UPDATE_INTERVAL = 100;
 let downloadInterval = null;
 let archiveSizeTimer = null;
 let startDownloadRequested = false;
-/* После долгого HTTP-download SoftAP часто оставляет WS «полуживым»
-   (readyState=OPEN, а кадры/команды уже не доходят). Нужен reconnect.
-   Флаг липкий: снимается только после успешного onopen на вкладке «Терминал»
-   (или после первого binary-кадра). Auto-reconnect на downloads его НЕ сбрасывает. */
 let needsWsRefresh = false;
 let terminalFrameWatchdog = null;
 let terminalReconnectAttempts = 0;
@@ -167,14 +163,11 @@ function getWsUrl() {
 
 function connectWebSocket() {
     if (isDownloading) return;
-    // Уже есть живое или устанавливающееся соединение
     if (ws && (ws.readyState === WebSocket.CONNECTING || ws.readyState === WebSocket.OPEN)) {
         return;
     }
 
     intentionalClose = false;
-    // Не вызываем close() на старом сокете здесь — это провоцирует гонку
-    // с сервером (старый fd ещё owner → 503 → Invalid frame header).
     ws = null;
 
     console.log('Connecting WebSocket to', getWsUrl());
@@ -210,7 +203,6 @@ function connectWebSocket() {
             }
         }, 500);
 
-        /* active:true = пауза кадров терминала (load_page_active на ESP) */
         const pauseTerminal = (currentTab === 'downloads' || currentTab === 'firmware');
         try {
             ws.send(JSON.stringify({ action: 'setTerminalActive', active: pauseTerminal }));
@@ -218,7 +210,6 @@ function connectWebSocket() {
                 ws.send(JSON.stringify({ action: 'getArchiveSize' }));
             }
             if (currentTab === 'firmware') {
-                /* версия после реконнекта — WS уже OPEN */
                 setTimeout(() => {
                     if (currentTab === 'firmware' && ws && ws.readyState === WebSocket.OPEN) {
                         requestFirmwareVersion();
@@ -226,8 +217,6 @@ function connectWebSocket() {
                 }, 100);
             }
             if (currentTab === 'terminal') {
-                /* Снимаем sticky только когда реально на терминале.
-                   Auto-reconnect после download (на downloads) флаг НЕ трогает. */
                 startTerminalFrameWatchdog();
             }
         } catch (e) {}
@@ -238,7 +227,6 @@ function connectWebSocket() {
         const wasIntentional = intentionalClose;
         ws = null;
         if (isDownloading) {
-            /* Во время длинного download SoftAP может уронить WS — reconnect после */
             needsWsRefresh = true;
             return;
         }
@@ -250,13 +238,10 @@ function connectWebSocket() {
 
     ws.onerror = (err) => {
         console.log('WS error:', err);
-        // onclose придёт следом — реконнект там
     };
 
     ws.onmessage = (event) => {
-        // ===== БИНАРНЫЙ КАДР ЭКРАНА (оригинал) =====
         if (event.data instanceof ArrayBuffer) {
-            /* Живой поток кадров — SoftAP/WS восстановлены */
             if (needsWsRefresh) needsWsRefresh = false;
             terminalReconnectAttempts = 0;
             if (terminalFrameWatchdog) {
@@ -284,8 +269,6 @@ function connectWebSocket() {
         }
 
         console.log('📨 WS message:', msg.type, msg);
-
-        // Подтверждение старта download → HTTP fetch
         if (msg.type === 'log' && msg.msg === 'Download start requested') {
             if (startDownloadRequested && !isDownloading) {
                 console.log('Server confirmed, starting HTTP fetch...');
@@ -317,12 +300,10 @@ function connectWebSocket() {
                 break;
 
             case 'progress':
-                // прогресс считаем на клиенте из HTTP
                 break;
 
             case 'downloadComplete':
             case 'downloadStopped':
-                // сервер закончил — UI уже сбросится в finally fetch
                 break;
 
             case 'firmwareVersion':
@@ -334,31 +315,75 @@ function connectWebSocket() {
                 break;
 
             case 'firmwareUploadStart':
-                setFwStatus('отправка…');
+                fwUploadInProgress = true;
+                updateFirmwareButtons();
+                setFwStatus('передача по UART (0x65)…');
+                if (typeof msg.size === 'number' && msg.size > 0) {
+                    updateFwProgress(0, msg.size);
+                }
+                break;
+
+            /* Временно: дамп пакетов 0x65 / попытки — только console */
+            case 'firmwareDebug':
+                console.log('[FW 0x65]', msg.msg || msg);
                 break;
 
             case 'firmwareProgress':
+                fwUploadInProgress = true;
                 updateFwProgress(msg.received || 0, msg.total || 0);
+                {
+                    const tot = msg.total || 0;
+                    const rec = msg.received || 0;
+                    const pct = tot > 0 ? Math.round((rec / tot) * 100) : 0;
+                    setFwStatus('передача 0x65: ' + pct + '%');
+                }
                 break;
 
             case 'firmwareUploadComplete':
-                setFwStatus('файл отправлен');
+                fwUploadInProgress = false;
                 fwFileReady = true;
+                if (typeof msg.size === 'number') {
+                    updateFwProgress(msg.size, msg.size);
+                }
+                setFwStatus('файл отправлен (0x65 OK)');
                 updateFirmwareButtons();
                 break;
 
             case 'firmwareUploadError':
-                setFwStatus('ошибка отправки');
+                fwUploadInProgress = false;
                 fwFileReady = false;
+                {
+                    let t = 'ошибка 0x65';
+                    if (msg.msg) t += ': ' + msg.msg;
+                    if (typeof msg.offset === 'number') t += ' @' + msg.offset;
+                    setFwStatus(t);
+                }
                 updateFirmwareButtons();
                 break;
 
             case 'reflashStarted':
-                setFwStatus('команда перепрошивки отправлена');
+                setFwStatus('FC 0x06 отправлена (код 0x20), опрос 0x008A…');
+                break;
+
+            case 'reflashStatus':
+                {
+                    const c = (typeof msg.code === 'number') ? msg.code : -1;
+                    const m = msg.msg || '';
+                    /* Поле «Статус» на вкладке перепрошивки */
+                    setFwStatus('0x008A: ' + c + (m ? ' — ' + m : ''));
+                    console.log('[FW reflash 0x008A]', c, m);
+                }
+                break;
+
+            case 'deviceCode':
+                console.log('Device code set:', msg.code);
                 break;
 
             case 'error':
                 console.error('Server error:', msg.msg);
+                if (msg.msg && /FC06|reflash|0x06/i.test(msg.msg)) {
+                    setFwStatus('ошибка: ' + msg.msg);
+                }
                 break;
 
             default:
@@ -490,7 +515,6 @@ function showTab(name) {
                    Флаг needsWsRefresh липкий до первого кадра / onopen terminal. */
                 forceReconnectWebSocket(needsWsRefresh ? 'post-download-tab' : 'terminal-tab');
             } else {
-                /* Снять паузу кадров — иначе после «Загрузки» экран молчит */
                 try {
                     ws.send(JSON.stringify({ action: 'setTerminalActive', active: false }));
                 } catch (e) {}
@@ -522,7 +546,6 @@ function showTab(name) {
             } catch (e) {}
             requestFirmwareVersion();
         } else if (!isDownloading) {
-            /* onopen сам запросит версию, когда WS поднимется */
             connectWebSocket();
             setFwStatus('подключение…');
         } else {
@@ -656,8 +679,7 @@ function startDownload() {
     receivedBytes = 0;
     downloadChunks = [];
     downloadAbortReason = null;
-    fileName = ''; /* имя придёт из HTTP-заголовков после первого пакета */
-
+    fileName = ''; 
     const btnDownload = document.getElementById('btn-download');
     const btnStop = document.getElementById('btn-stop');
     if (btnDownload) btnDownload.disabled = true;
@@ -677,9 +699,6 @@ async function startHttpFetch() {
     downloadStartTime = Date.now();
     receivedBytes = 0;
     downloadChunks = [];
-
-    // WS оставляем открытым: stop уходит по WS, нет гонки сокетов SoftAP.
-    // (Раньше close WS + abort HTTP ломали httpd → ERR_CONNECTION_RESET.)
 
     downloadController = new AbortController();
 
@@ -711,7 +730,6 @@ async function startHttpFetch() {
         if (!res.ok) throw new Error('HTTP ' + res.status);
         if (!res.body) throw new Error('No response body');
 
-        /* Имя из первого пакета (сервер уже извлёк и положил в заголовки) */
         const fromHdr = parseFileNameFromHeaders(res);
         if (fromHdr) {
             fileName = fromHdr;
@@ -752,7 +770,6 @@ async function startHttpFetch() {
         if (e.name === 'AbortError') {
             console.log('Download aborted, reason =', downloadAbortReason || 'user');
             if (receivedBytes > 0) {
-                /* partial — то же имя из заголовков (уже в fileName), суффикс _partial */
                 saveBlob(downloadChunks, makePartialName(fileName || 'archive.bin'));
                 if (downloadAbortReason !== 'tab') {
                     alert('Скачивание остановлено.\nСохранён частичный файл: ' + formatBytes(receivedBytes));
@@ -781,16 +798,14 @@ async function startHttpFetch() {
         const btnDownload = document.getElementById('btn-download');
         const btnStop = document.getElementById('btn-stop');
         if (btnStop) btnStop.disabled = true;
-        /* Пауза: handler на ESP должен выйти из цикла и отпустить сокет */
+        
         if (btnDownload) btnDownload.disabled = true;
 
-        /* Длинный /download на SoftAP часто «убивает» WS без onclose в браузере.
-           Всегда помечаем и делаем force-reconnect — иначе терминал молчит. */
         needsWsRefresh = true;
         intentionalClose = false;
         setTimeout(() => {
             if (btnDownload) btnDownload.disabled = false;
-            /* Дать HTTP-handler'у на ESP выйти из цикла и отпустить сокет */
+            
             forceReconnectWebSocket('post-download');
             setTimeout(() => {
                 if (currentTab === 'downloads' && !isDownloading) {
@@ -805,18 +820,16 @@ function stopDownload() {
     console.log('Stop download requested');
     if (!downloadAbortReason) downloadAbortReason = 'user';
 
-    /* 1) WS stop — handler увидит флаг на следующей итерации */
     if (ws && ws.readyState === WebSocket.OPEN) {
         try {
             ws.send(JSON.stringify({ action: 'stopDownload' }));
         } catch (e) {}
     }
-    /* 2) HTTP stop — запасной канал */
+
     try {
         fetch('/stop-download', { method: 'POST', cache: 'no-store' }).catch(function () {});
     } catch (e) {}
 
-    /* 3) Обрыв тела /download */
     if (downloadController) {
         try { downloadController.abort(); } catch (e) {}
         downloadController = null;
@@ -879,25 +892,33 @@ function setFwStatus(text) {
 }
 
 function updateFwProgress(received, total) {
+    received = Math.max(0, Number(received) || 0);
+    total = Math.max(0, Number(total) || 0);
+    if (typeof window._fwProgRecv === 'number' && received < window._fwProgRecv &&
+        total === window._fwProgTotal) {
+        received = window._fwProgRecv;
+    }
+    window._fwProgRecv = received;
+    window._fwProgTotal = total;
+
     const pct = total > 0 ? Math.min(100, (received / total) * 100) : 0;
+    const pctStr = Math.round(pct) + '%';
     const bar = document.getElementById('fw-progress-bar');
     const txt = document.getElementById('fw-progress-text');
-    const sent = document.getElementById('fw-sent-bytes');
-    const tot = document.getElementById('fw-total-bytes');
+    const pctEl = document.getElementById('fw-progress-pct');
+    const wrap = document.getElementById('fw-progress-wrap');
+    if (wrap) wrap.style.display = '';
     if (bar) bar.style.width = pct + '%';
-    if (txt) txt.textContent = Math.round(pct) + '%';
-    if (sent) sent.textContent = typeof formatBytes === 'function' ? formatBytes(received) : received;
-    if (tot) tot.textContent = typeof formatBytes === 'function' ? formatBytes(total) : total;
+    if (txt) txt.textContent = pctStr;
+    if (pctEl) pctEl.textContent = pctStr;
 }
 
 function updateFirmwareButtons() {
     const btnUp = document.getElementById('btn-fw-upload');
     const btnRf = document.getElementById('btn-fw-reflash');
     const wsOk = !!(ws && ws.readyState === WebSocket.OPEN);
-    /* Отправка: файл выбран и size > 0 */
     const canUpload = !!(fwSelectedFile && fwSelectedFile.size > 0 && !fwUploadInProgress);
     if (btnUp) btnUp.disabled = !canUpload;
-    /* Перепрошивка: WS есть, не идёт upload (файл на устройстве желателен, но команда — отдельно) */
     if (btnRf) btnRf.disabled = !wsOk || fwUploadInProgress;
 }
 
@@ -914,7 +935,12 @@ function requestFirmwareVersion() {
 
 function onFirmwareFileSelected(ev) {
     const input = ev.target;
-    const f = input.files && input.files[0] ? input.files[0] : null;
+    let f = input.files && input.files[0] ? input.files[0] : null;
+    if (f && !/\.ubt$/i.test(f.name)) {
+        alert('Нужен файл с расширением .ubt');
+        input.value = '';
+        f = null;
+    }
     fwSelectedFile = f;
     fwFileReady = false;
     const nameEl = document.getElementById('fw-file-name');
@@ -932,18 +958,24 @@ function onFirmwareFileSelected(ev) {
             ' (' + f.size + ')';
         if (chooseBtn) chooseBtn.textContent = 'Сменить файл';
         updateFwProgress(0, f.size);
-        setFwStatus('файл выбран');
+        setFwStatus('файл выбран (.ubt)');
     }
     updateFirmwareButtons();
 }
 
-/** POST /firmware с прогрессом (XHR) → ESP пишет куски в UART (firmware_manager) */
+/**
+ * POST /firmware → ESP режет файл и шлёт FC 0x65 по UART.
+ * Прогресс-бар обновляется в основном из WS firmwareProgress (после каждой порции),
+ * XHR upload.onprogress — запасной канал (браузер→ESP).
+ */
 function uploadFirmware() {
     if (!fwSelectedFile || fwSelectedFile.size <= 0 || fwUploadInProgress) return;
     fwUploadInProgress = true;
     fwFileReady = false;
     updateFirmwareButtons();
-    setFwStatus('отправка на устройство…');
+    setFwStatus('передача по UART (0x65)…');
+    window._fwProgRecv = 0;
+    window._fwProgTotal = fwSelectedFile.size;
     updateFwProgress(0, fwSelectedFile.size);
 
     const xhr = new XMLHttpRequest();
@@ -951,22 +983,40 @@ function uploadFirmware() {
     xhr.responseType = 'text';
     xhr.setRequestHeader('Content-Type', 'application/octet-stream');
 
-    xhr.upload.onprogress = function (ev) {
-        if (ev.lengthComputable) {
-            updateFwProgress(ev.loaded, ev.total || fwSelectedFile.size);
-        }
-    };
+    /* Прогресс только с ESP (firmwareProgress по UART), XHR не трогаем бар —
+       иначе скачет: браузер уже «залил» SoftAP, а UART ещё в начале. */
 
     xhr.onload = function () {
-        fwUploadInProgress = false;
         if (xhr.status >= 200 && xhr.status < 300) {
             fwFileReady = true;
-            setFwStatus('файл отправлен');
-            updateFwProgress(fwSelectedFile.size, fwSelectedFile.size);
+            if (fwUploadInProgress) {
+                fwUploadInProgress = false;
+                updateFwProgress(fwSelectedFile.size, fwSelectedFile.size);
+                /* FC 0x06 + статус 0x008A запускаются на ESP после 0x65 */
+                setFwStatus('0x65 OK → авто FC06 (код 0x20), ждём 0x008A…');
+            }
         } else {
+            fwUploadInProgress = false;
             fwFileReady = false;
-            setFwStatus('ошибка HTTP ' + xhr.status);
-            alert('Не удалось отправить файл: HTTP ' + xhr.status);
+            let detail = '';
+            try {
+                const j = JSON.parse(xhr.responseText || '{}');
+                if (j.msg) detail = j.msg;
+                if (typeof j.offset === 'number') detail += ' (offset ' + j.offset + ')';
+            } catch (e) {
+                detail = (xhr.responseText || '').slice(0, 120);
+            }
+            setFwStatus('ошибка HTTP ' + xhr.status + (detail ? ': ' + detail : ''));
+            let hint = '';
+            if (/0x21/i.test(detail) || /IRZ reject/i.test(detail) || /illegal function/i.test(detail)) {
+                hint = '\n\nКСУ отклонил FC 0x65.\n' +
+                    '1) На КСУ тип Modbus = «ИРЗ»\n' +
+                    '2) ПО КСУ ≥ 6.2.2369\n' +
+                    '3) Файл: 16 байт header (mfg=54) + тело + FFFFFFFF\n' +
+                    '4) В консоли ищи строку «FW hdr: …» — там разбор заголовка';
+            }
+            alert('Не удалось отправить файл: HTTP ' + xhr.status +
+                  (detail ? '\n' + detail : '') + hint);
         }
         updateFirmwareButtons();
     };
@@ -998,13 +1048,11 @@ function startReflash() {
         alert('Дождитесь окончания отправки файла');
         return;
     }
-    const hint = fwFileReady
-        ? 'Файл уже отправлен. Запустить перепрошивку?'
-        : 'Файл ещё не отправляли на устройство в этой сессии.\nВсё равно отправить команду перепрошивки по UART?';
-    if (!confirm(hint)) return;
+    const code = 0x20;
+    if (!confirm('Отправить FC 0x06 (код 0x20 / 32) и прочитать статус 0x008A?')) return;
     try {
-        ws.send(JSON.stringify({ action: 'startReflash' }));
-        setFwStatus('команда перепрошивки…');
+        ws.send(JSON.stringify({ action: 'startReflash', code: code }));
+        setFwStatus('команда перепрошивки (код 0x20)…');
     } catch (e) {
         alert('Ошибка отправки команды');
     }

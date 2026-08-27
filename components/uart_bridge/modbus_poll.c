@@ -8,7 +8,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
-#include "archive_manager.h"  // <-- ДОБАВИТЬ
+#include "archive_manager.h"
 
 #include "esp_log.h"
 
@@ -219,28 +219,24 @@ void modbus_poll_task(void *arg) {
             continue;
         }
 
-        // 1. Чтение времени (3 регистра)
-        if (modbus_read_registers(1, 0x00FA, 3, time_regs) != MODBUS_OK) {
+        if (modbus_read_registers(0x00FA, 3, time_regs) != MODBUS_OK) {
             ESP_LOGW(TAG, "Failed to read time registers");
             vTaskDelay(pdMS_TO_TICKS(200));
             continue;
         }
 
-        // 2. Чтение состояния СУ (1 регистр)
-        if (modbus_read_registers(1, 0x00FF, 1, &status) != MODBUS_OK) {
+        if (modbus_read_registers(0x00FF, 1, &status) != MODBUS_OK) {
             ESP_LOGW(TAG, "Failed to read status register");
             vTaskDelay(pdMS_TO_TICKS(200));
             continue;
         }
 
-        // 3. Чтение параметров (16 регистров: 0x0101 … 0x0110)
-        if (modbus_read_registers(1, 0x0101, 16, params) != MODBUS_OK) {
+        if (modbus_read_registers(0x0101, 16, params) != MODBUS_OK) {
             ESP_LOGW(TAG, "Failed to read parameter registers");
             vTaskDelay(pdMS_TO_TICKS(200));
             continue;
         }
 
-        // === Распаковка времени ===
         uint8_t month  = (time_regs[0] >> 8) & 0xFF;
         uint8_t day    = time_regs[0] & 0xFF;
         uint8_t hour   = (time_regs[1] >> 8) & 0xFF;
@@ -252,7 +248,6 @@ void modbus_poll_task(void *arg) {
         snprintf(datetime, sizeof(datetime), "%02d.%02d.%02d %02d:%02d:%02d",
                  day, month, year, hour, minute, second);
 
-        // === Распаковка параметров (индекс 0 → 0x0101) ===
         uint16_t insulation = params[0];  // кОм
         uint16_t uab        = params[1];  // В
         uint16_t ubc        = params[2];
@@ -270,7 +265,6 @@ void modbus_poll_task(void *arg) {
         uint16_t dc_voltage = params[14];          // В
         uint16_t heatsink_temp = params[15];       // °C
 
-        // Преобразование в физические значения
         float ia = ia_raw / 10.0f;
         float ib = ib_raw / 10.0f;
         float ic = ic_raw / 10.0f;
@@ -279,7 +273,6 @@ void modbus_poll_task(void *arg) {
         float freq = freq_raw / 10.0f;
         float vfd_current = vfd_current_raw / 10.0f;
 
-        // === Распаковка статуса ===
         bool ped_running = (status >> 15) & 0x01;
         bool start_block = (status >> 14) & 0x01;
         uint8_t mode = (status >> 12) & 0x03;
@@ -293,7 +286,6 @@ void modbus_poll_task(void *arg) {
             case 3: mode_str = "АВТОМАТ"; break;
         }
 
-        // === Формирование JSON ===
         snprintf(json, sizeof(json),
             "{"
             "\"datetime\":\"%s\","
@@ -363,14 +355,12 @@ static void terminal_task(void *arg)
 
     while (1)
     {
-        // Если идёт загрузка, пропускаем опрос экрана
         if (load_page_active || download_in_progress || !web_client_connected) {
             vTaskDelay(pdMS_TO_TICKS(50));
             continue;
         }
         bool ok =
             terminal_read_screen(
-                1,
                 screen,
                 &screen_len
             );
@@ -379,7 +369,6 @@ static void terminal_task(void *arg)
             web_server_send_binary(screen, screen_len);
         }
 
-        /* ~5 кадр/с — достаточно для UI, UART не забиваем */
         vTaskDelay(pdMS_TO_TICKS(200));
     }
 }
@@ -410,7 +399,6 @@ void terminal_task_start(void)
  * @return true при успехе
  */
 bool terminal_read_screen(
-    uint8_t slave_id,
     uint8_t *screen,
     uint16_t *screen_len
 )
@@ -423,17 +411,17 @@ bool terminal_read_screen(
     uint8_t request[16];
     int pos = 0;
 
-    request[pos++] = slave_id;
+    request[pos++] = SLAVE_ID;
     request[pos++] = 0x64;
-    /* FILE = 11 */
+
     request[pos++] = 0x00;
     request[pos++] = 0x0B;
-    /* OFFSET = 0 */
+
     request[pos++] = 0x00;
     request[pos++] = 0x00;
     request[pos++] = 0x00;
     request[pos++] = 0x00;
-    /* SIZE = 2000 */
+
     request[pos++] = 0x00;
     request[pos++] = 0x00;
     request[pos++] = 0x07;
@@ -441,7 +429,6 @@ bool terminal_read_screen(
     mbcrc_insert_crc(request, pos);
     pos += 2;
 
-    /* Атомарный TX+RX; timeout в миллисекундах (не ticks!) */
     uint8_t response[2100];
     int len = uart_bridge_transact(
         request, (size_t)pos,
@@ -454,7 +441,6 @@ bool terminal_read_screen(
         return false;
     }
 
-    /* data after: slave+func+file+offset+size = 12, CRC at end */
     const int data_offset = 12;
     int data_len = len - data_offset - 2;
     if (data_len <= 0) {
@@ -493,29 +479,24 @@ bool terminal_send_command(uint8_t slave_id,  const char *key_code) {
     int pos = 0;
 
     request[pos++] = slave_id;
-    request[pos++] = 0x65;                           // функция записи в файл
+    request[pos++] = 0x65;
 
-    // FILE = 11 (терминал)
     request[pos++] = 0x00;
     request[pos++] = 0x0B;
 
-    // OFFSET = 0
     request[pos++] = 0x00;
     request[pos++] = 0x00;
     request[pos++] = 0x00;
     request[pos++] = 0x00;
 
-    // SIZE = data_len (4 байта, big-endian)
     request[pos++] = (data_len >> 24) & 0xFF;
     request[pos++] = (data_len >> 16) & 0xFF;
     request[pos++] = (data_len >> 8) & 0xFF;
     request[pos++] = data_len & 0xFF;
 
-    // Копируем данные (без нулевого терминатора)
     memcpy(&request[pos], key_code, data_len);
     pos += data_len;
 
-    // CRC
     mbcrc_insert_crc(request, pos);
     pos += 2;
 
@@ -526,26 +507,22 @@ bool terminal_send_command(uint8_t slave_id,  const char *key_code) {
         return false;
     }
 
-    // Проверка CRC
     if (!mbcrc_is_valid(response, len)) {
         ESP_LOGE("TERMINAL", "CRC error in response");
         return false;
     }
 
-    // Проверка кода функции
     if (response[1] != 0x65) {
         ESP_LOGE("TERMINAL", "Unexpected function code: 0x%02X", response[1]);
         return false;
     }
 
-    // Проверка размера данных (должен быть 2)
     uint32_t resp_size = (response[8] << 24) | (response[9] << 16) | (response[10] << 8) | response[11];
     if (resp_size != 2) {
         ESP_LOGE("TERMINAL", "Wrong data size: %u", resp_size);
         return false;
     }
 
-    //ESP_LOGI("TERMINAL", "Command 0x65 succeeded for key 0x%04X", key_code);
     return true;
 }
 
@@ -564,7 +541,7 @@ const char*  get_key_code(const char *cmd)
     if (strcmp(cmd, "left") == 0)    return "\x1b[D";
     if (strcmp(cmd, "right") == 0)   return "\x1b[C";
     if (strcmp(cmd, "enter") == 0)   return "\r";
-    if (strcmp(cmd, "esc") == 0)     return "q";  // два байта 0x12 0x34
+    if (strcmp(cmd, "esc") == 0)     return "q";
     if (strcmp(cmd, "start") == 0)   return "5";
     if (strcmp(cmd, "stop") == 0)    return "6";
     return NULL;

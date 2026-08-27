@@ -120,8 +120,8 @@
         </div>
 
         <div class="download-row fw-file-row">
-            <label>Файл прошивки:</label>
-            <input type="file" id="fw-file-input" accept=".bin,.hex,.irz,.fw,*/*" hidden />
+            <label>Файл прошивки (.ubt):</label>
+            <input type="file" id="fw-file-input" accept=".ubt,application/octet-stream" hidden />
             <button type="button" id="btn-fw-choose" class="btn-secondary" onclick="document.getElementById('fw-file-input').click()">Выбрать файл</button>
         </div>
 
@@ -136,20 +136,18 @@
         </div>
 
         <div class="download-actions">
-            <button id="btn-fw-upload" class="btn-start-download" onclick="uploadFirmware()" disabled>Отправить на UART</button>
-            <button id="btn-fw-reflash" class="btn-reflash" onclick="startReflash()" disabled>Перепрошить</button>
+            <button id="btn-fw-upload" class="btn-start-download" onclick="uploadFirmware()" disabled>Отправить и перепрошить</button>
+            <button id="btn-fw-reflash" class="btn-reflash" onclick="startReflash()" disabled>Повторить FC06 / статус</button>
         </div>
 
-        <div class="progress-container">
+        <div class="progress-container fw-progress-container" id="fw-progress-wrap">
             <div id="fw-progress-bar" class="progress-bar" style="width:0%;"></div>
             <div id="fw-progress-text" class="progress-text">0%</div>
         </div>
 
         <div class="download-info">
-            <span class="label">Отправлено:</span>
-            <span class="value" id="fw-sent-bytes">0</span>
-            <span class="label">Всего:</span>
-            <span class="value" id="fw-total-bytes">0</span>
+            <span class="label">Прогресс:</span>
+            <span class="value" id="fw-progress-pct">0%</span>
             <span class="label">Статус:</span>
             <span class="value" id="fw-status">ожидание</span>
         </div>

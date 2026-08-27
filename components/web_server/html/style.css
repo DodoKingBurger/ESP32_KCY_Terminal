@@ -434,6 +434,35 @@ body {
     font-size: 14px;
     max-width: 100%;
 }
+.fw-device-input {
+    width: 72px;
+    padding: 8px 10px;
+    background: #0b0f14;
+    color: #00ff88;
+    border: 1px solid #334155;
+    border-radius: 4px;
+    font-family: Consolas, monospace;
+    font-size: 16px;
+    text-align: center;
+}
+.fw-device-input:focus {
+    outline: none;
+    border-color: #00ff88;
+    box-shadow: 0 0 0 1px rgba(0, 255, 136, 0.25);
+}
+.firmware-panel .hint {
+    color: #64748b;
+    font-size: 13px;
+    margin-left: 8px;
+}
+.fw-progress-container {
+    margin: 12px 0;
+    min-height: 36px;
+}
+.fw-progress-container .progress-bar {
+    background: linear-gradient(90deg, #0ea5e9, #00ff88);
+    transition: width 0.15s linear;
+}
 .btn-secondary {
     padding: 8px 16px;
     background: #1e293b;

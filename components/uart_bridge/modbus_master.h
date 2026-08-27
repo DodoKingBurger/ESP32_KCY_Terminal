@@ -3,6 +3,13 @@
 #include <stdint.h>
 #include <stdbool.h>
 
+#define MODBUS_TIMEOUT_MS 200
+#define SLAVE_ID            1
+#define MAX_RETRIES      3
+#define REFLASH_STATUS_REG 0x008A
+/* 0x20 = 32 dec = КСУ Linux*/
+#define FW_DEVICE_CODE_KSULINUX  0x20
+
 typedef enum
 {
     MODBUS_END_OF_FILE = 1,
@@ -16,7 +23,6 @@ typedef enum
 /* ---- Общие Modbus-функции (holding / input / file / archive) ---- */
 
 modbus_status_t modbus_read_holding(
-    uint8_t slave,
     uint16_t reg,
     uint16_t count,
     uint8_t *response,
@@ -24,7 +30,6 @@ modbus_status_t modbus_read_holding(
 );
 
 modbus_status_t modbus_read_input(
-    uint8_t slave,
     uint16_t reg,
     uint16_t count,
     uint8_t *response,
@@ -32,30 +37,23 @@ modbus_status_t modbus_read_input(
 );
 
 modbus_status_t modbus_read_registers(
-    uint8_t slave,
     uint16_t start_reg,
     uint16_t count,
     uint16_t *values
 );
 
-/** Holding registers (FC 0x03), распаковка в uint16_t[] */
-modbus_status_t modbus_read_holding_registers(
-    uint8_t slave,
-    uint16_t start_reg,
-    uint16_t count,
-    uint16_t *values
-);
-
-modbus_status_t modbus_write_single_register(
-    uint8_t slave,
-    uint16_t reg,
-    uint16_t value
-);
-
-modbus_status_t modbus_read_file_0x64(uint8_t slave, uint32_t offset,
+modbus_status_t modbus_read_file_0x64(uint32_t offset,
     uint32_t size, uint8_t *out, uint16_t *out_len);
 
-modbus_status_t modbus_read_file_0x14(uint8_t slave, uint16_t file_id,
+/** use_classic_uart: true = путь как у архива; false = long_tx (сброс эха) */
+modbus_status_t modbus_write_file_0x65(uint16_t file_id,
+    uint32_t offset, const uint8_t *data, uint32_t data_len,
+    bool use_classic_uart);
+
+/** Деталь последней ошибки 0x65 (до следующего вызова) */
+const char *modbus_write_file_0x65_last_error(void);
+
+modbus_status_t modbus_read_file_0x14(uint16_t file_id,
     uint16_t record_number, uint8_t *out, uint16_t *out_len);
 
-bool modbus_read_archive_size(uint8_t slave, uint32_t *size);
+bool modbus_read_archive_size(uint32_t *size);

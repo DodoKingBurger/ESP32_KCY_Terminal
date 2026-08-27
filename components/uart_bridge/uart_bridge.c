@@ -73,71 +73,52 @@ void uart_bridge_init(void)
 }
 
 /**
- * @brief Отправка данных через UART
- * @param data указатель на данные
- * @param len  длина в байтах
- * @return количество отправленных байт или -1 при ошибке
- */
-int uart_bridge_send(
-    const uint8_t *data,
-    size_t len
-)
-{
-    xSemaphoreTake(uart_mutex, portMAX_DELAY);
-    uart_flush(UART_PORT);
-    
-    int ret =
-        uart_write_bytes(
-            UART_PORT,
-            data,
-            len
-        );
-
-    /*
-    Ждем завершения передачи
-    */
-
-    uart_wait_tx_done(
-        UART_PORT,
-        pdMS_TO_TICKS(300)
-    );
-    xSemaphoreGive(uart_mutex);
-    return ret;
-}
-
-/**
- * @brief Приём данных из UART с таймаутом
- * @param data      буфер для приёма
- * @param max_len   максимальное количество байт
- * @param timeout_ms таймаут в миллисекундах
- * @return количество принятых байт или -1 при ошибке/таймауте
- */
-int uart_bridge_receive(
-    uint8_t *data,
-    size_t max_len,
-    uint32_t timeout_ms
-)
-{
-    xSemaphoreTake(uart_mutex, portMAX_DELAY);
-    int ret = uart_read_bytes(
-        UART_PORT, 
-        data, 
-        max_len, 
-        pdMS_TO_TICKS(timeout_ms));
-    xSemaphoreGive(uart_mutex);
-    return ret;
-}
-
-/**
  * Modbus RTU-приём:
  *  - ждём первый байт до timeout_ms
  *  - дальше копим данные с коротким inter-byte timeout
- * Иначе uart_read_bytes(rx_max=4096) ждёт полный timeout на КАЖДОМ кадре.
  */
 #ifndef UART_INTERBYTE_MS
 #define UART_INTERBYTE_MS 15
 #endif
 
+static uint32_t tx_wait_ms(size_t tx_len)
+{
+    const uint32_t baud = (uint32_t)UART_BAUD_RATE;
+    uint32_t tx_ms = 50;
+    if (baud > 0) {
+        tx_ms = (uint32_t)((tx_len * 11ull * 1000ull) / baud) + 20;
+    }
+    if (tx_ms < 50) tx_ms = 50;
+    if (tx_ms > 5000) tx_ms = 5000;
+    return tx_ms;
+}
+
+static int transact_rx(uint8_t *rx, size_t rx_max, uint32_t timeout_ms)
+{
+    int n = uart_read_bytes(UART_PORT, rx, 1, pdMS_TO_TICKS(timeout_ms));
+    if (n <= 0) {
+        return 0;
+    }
+    int total = n;
+    while ((size_t)total < rx_max) {
+        n = uart_read_bytes(
+            UART_PORT,
+            rx + total,
+            rx_max - (size_t)total,
+            pdMS_TO_TICKS(UART_INTERBYTE_MS)
+        );
+        if (n <= 0) {
+            break;
+        }
+        total += n;
+    }
+    return total;
+}
+
+/**
+ * Путь для архива/терминала/регистров — без post-TX flush.
+ * Поведение как до внедрения 0x65.
+ */
 int uart_bridge_transact(
     const uint8_t *tx,
     size_t tx_len,
@@ -156,33 +137,56 @@ int uart_bridge_transact(
 
     int written = uart_write_bytes(UART_PORT, tx, tx_len);
     if (written != (int)tx_len) {
+        ESP_LOGW("UART", "write short: %d / %u", written, (unsigned)tx_len);
         xSemaphoreGive(uart_mutex);
         return -1;
     }
 
-    uart_wait_tx_done(UART_PORT, pdMS_TO_TICKS(50));
+    uart_wait_tx_done(UART_PORT, pdMS_TO_TICKS(tx_wait_ms(tx_len)));
 
-    /* 1) Первый байт — до timeout_ms */
-    int n = uart_read_bytes(UART_PORT, rx, 1, pdMS_TO_TICKS(timeout_ms));
-    if (n <= 0) {
+    int total = transact_rx(rx, rx_max, timeout_ms);
+
+    xSemaphoreGive(uart_mutex);
+    return total;
+}
+
+/**
+ * Только FC 0x65 (длинный TX). Архив сюда не ходит.
+ */
+int uart_bridge_transact_long_tx(
+    const uint8_t *tx,
+    size_t tx_len,
+    uint8_t *rx,
+    size_t rx_max,
+    uint32_t timeout_ms
+)
+{
+    if (uart_mutex == NULL || tx == NULL || rx == NULL || tx_len == 0 || rx_max == 0) {
+        return -1;
+    }
+
+    xSemaphoreTake(uart_mutex, portMAX_DELAY);
+
+    uart_flush(UART_PORT);
+
+    int written = uart_write_bytes(UART_PORT, tx, tx_len);
+    if (written != (int)tx_len) {
+        ESP_LOGW("UART", "long TX write short: %d / %u", written, (unsigned)tx_len);
         xSemaphoreGive(uart_mutex);
-        return 0;
+        return -1;
     }
-    int total = n;
 
-    /* 2) Остаток кадра — короткие паузы между байтами */
-    while ((size_t)total < rx_max) {
-        n = uart_read_bytes(
-            UART_PORT,
-            rx + total,
-            rx_max - (size_t)total,
-            pdMS_TO_TICKS(UART_INTERBYTE_MS)
-        );
-        if (n <= 0) {
-            break; /* тишина = конец кадра */
-        }
-        total += n;
-    }
+    uart_wait_tx_done(UART_PORT, pdMS_TO_TICKS(tx_wait_ms(tx_len)));
+
+    /*
+     * Эхо half-duplex уже в FIFO. Ответ КСУ на запись порции — после обработки.
+     * Сбрасываем эхо; пауза даёт время на запись во flash.
+     */
+    uart_flush(UART_PORT);
+    vTaskDelay(pdMS_TO_TICKS(50));
+    uart_flush(UART_PORT);
+
+    int total = transact_rx(rx, rx_max, timeout_ms);
 
     xSemaphoreGive(uart_mutex);
     return total;

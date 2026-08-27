@@ -13,14 +13,12 @@ void terminal_task_start(void);
 
 /* ---- Терминал по UART (file 11, FC 0x64 / 0x65) ---- */
 bool terminal_read_screen(
-    uint8_t slave_id,
     uint8_t *screen,
     uint16_t *screen_len
 );
 
 bool terminal_send_command(uint8_t slave_id, const char *key_code);
 
-/** f1/up/enter/... → escape-последовательность для terminal_send_command */
 const char *get_key_code(const char *cmd);
 
 #ifdef __cplusplus

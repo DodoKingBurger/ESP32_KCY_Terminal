@@ -15,10 +15,6 @@
 #include <time.h>
 
 #define TAG              "ARCH"
-#define CHUNK_SIZE       2000
-#define HEADER_SIZE      132
-#define HEADER_SPEC_SIZE 4
-#define MAX_RETRIES      3
 
 bool download_in_progress = false;
 volatile bool download_stop_requested = false;
@@ -29,7 +25,6 @@ static char archive_name[256] = "archive.bin";
 static SemaphoreHandle_t archive_mutex = NULL;
 static bool name_extracted = false;
 
-/* Поколение сессии: при stop увеличиваем, handler выходит если generation изменился */
 static volatile uint32_t download_generation = 0;
 
 static void send_browser_log(const char *msg)
@@ -146,13 +141,13 @@ void archive_manager_init(void)
 
 bool archive_manager_get_archive_size(uint32_t *size)
 {
-    return modbus_read_archive_size(1, size);
+    return modbus_read_archive_size(size);
 }
 
 size_t archive_manager_get_size(void)
 {
     uint32_t size = 0;
-    if (modbus_read_archive_size(1, &size)) {
+    if (modbus_read_archive_size(&size)) {
         return (size_t)size;
     }
     return 0;
@@ -208,7 +203,6 @@ static bool send_chunk_to_client(httpd_req_t *req, const char *data, size_t len)
 esp_err_t archive_manager_http_download_handler(httpd_req_t *req)
 {
     if (download_in_progress) {
-        /* Не блокируем worker ожиданием — клиент повторит */
         download_stop_requested = true;
         httpd_resp_set_status(req, "503 Service Unavailable");
         httpd_resp_set_hdr(req, "Retry-After", "1");
@@ -217,7 +211,7 @@ esp_err_t archive_manager_http_download_handler(httpd_req_t *req)
         return ESP_OK;
     }
 
-    if (!modbus_read_archive_size(1, &total_size) || total_size == 0) {
+    if (!modbus_read_archive_size(&total_size) || total_size == 0) {
         httpd_resp_set_status(req, "404 Not Found");
         httpd_resp_set_hdr(req, "Connection", "close");
         httpd_resp_sendstr(req, "Archive empty or unavailable");
@@ -254,7 +248,7 @@ esp_err_t archive_manager_http_download_handler(httpd_req_t *req)
         modbus_status_t status = MODBUS_ERR;
         for (int i = 0; i < MAX_RETRIES; i++) {
             if (download_stop_requested || download_generation != my_gen) break;
-            status = modbus_read_file_0x64(1, 0, CHUNK_SIZE, chunk, &chunk_len);
+            status = modbus_read_file_0x64(0, CHUNK_SIZE, chunk, &chunk_len);
             if (status == MODBUS_OK || status == MODBUS_END_OF_FILE)
                 break;
             vTaskDelay(pdMS_TO_TICKS(50));
@@ -310,7 +304,7 @@ esp_err_t archive_manager_http_download_handler(httpd_req_t *req)
         modbus_status_t status = MODBUS_ERR;
         for (int i = 0; i < MAX_RETRIES; i++) {
             if (download_stop_requested || download_generation != my_gen) break;
-            status = modbus_read_file_0x64(1, offset, CHUNK_SIZE, chunk, &chunk_len);
+            status = modbus_read_file_0x64(offset, CHUNK_SIZE, chunk, &chunk_len);
             if (status == MODBUS_OK || status == MODBUS_END_OF_FILE)
                 break;
             vTaskDelay(pdMS_TO_TICKS(30));
@@ -339,7 +333,6 @@ esp_err_t archive_manager_http_download_handler(httpd_req_t *req)
         offset += CHUNK_SIZE;
         chunk_counter++;
 
-        /* Yield — не держим CPU и даём сработать stop */
         if ((chunk_counter & 1) == 0) {
             vTaskDelay(pdMS_TO_TICKS(2));
         }
@@ -348,12 +341,6 @@ esp_err_t archive_manager_http_download_handler(httpd_req_t *req)
     aborted = aborted || download_stop_requested || (download_generation != my_gen);
     (void)name_extracted;
 
-    /*
-     * Если клиент оборвал соединение после начала body:
-     *  - НЕ вызываем send_chunk(NULL,0) — это на мёртвом сокете
-     *    портит httpd и даёт ERR_CONNECTION_RESET на следующих запросах.
-     *  - Возвращаем ESP_FAIL, чтобы httpd принудительно закрыл сессию.
-     */
     if (aborted) {
         send_browser_log("Download aborted - no final chunk");
         {
@@ -365,11 +352,9 @@ esp_err_t archive_manager_http_download_handler(httpd_req_t *req)
         }
         download_in_progress = false;
         download_stop_requested = false;
-        /* ESP_FAIL => httpd закроет сокет сам, без нашего send */
         return ESP_FAIL;
     }
 
-    /* Нормальное завершение */
     send_browser_log(downloaded >= total_size
                      ? "Sending final chunk - download complete"
                      : "Partial download, closing stream");
@@ -403,7 +388,7 @@ void archive_manager_on_ws_command(const char *cmd)
     if (strstr(cmd, "\"getArchiveSize\"") || strstr(cmd, "\"getArchiveInfo\"") ||
         strstr(cmd, "\"action\":\"getArchiveSize\"")) {
         uint32_t size = 0;
-        if (modbus_read_archive_size(1, &size)) {
+        if (modbus_read_archive_size(&size)) {
             char resp[80];
             snprintf(resp, sizeof(resp),
                      "{\"type\":\"archiveSize\",\"size\":%lu}",
@@ -417,10 +402,8 @@ void archive_manager_on_ws_command(const char *cmd)
 
     if (strstr(cmd, "\"startDownload\"") || strstr(cmd, "\"action\":\"startDownload\"")) {
         if (download_in_progress) {
-            /* Сбрасываем зависшую сессию по запросу нового старта */
             archive_manager_stop_download();
             web_server_send("{\"type\":\"log\",\"msg\":\"Previous download stop requested\"}");
-            /* Клиент всё равно пойдёт на /download; если busy — 503 + retry */
         }
         web_server_send("{\"type\":\"log\",\"msg\":\"Download start requested\"}");
         return;
