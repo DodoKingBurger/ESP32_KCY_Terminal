@@ -55,6 +55,24 @@ let fwUploadInProgress = false;
 let fwFileReady = false;
 
 
+/** Версия прошивки ESP (PROJECT_VER) — topbar рядом с «ESP32 TERMINAL» */
+function setEspAppVersion(ver) {
+    const el = document.getElementById('esp-app-ver');
+    if (!el) return;
+    const v = (ver && String(ver).trim()) ? String(ver).trim() : '—';
+    el.textContent = v.indexOf('v') === 0 ? v : ('v' + v);
+    el.title = 'Версия прошивки ESP: ' + v;
+}
+
+function fetchEspAppVersion() {
+    fetch('/version', { cache: 'no-store' })
+        .then(function (r) { return r.ok ? r.json() : Promise.reject(r.status); })
+        .then(function (j) {
+            if (j && j.version) setEspAppVersion(j.version);
+        })
+        .catch(function () { /* softAP ещё поднимается */ });
+}
+
 // -------------------- Утилиты --------------------
 function formatBytes(bytes) {
     if (bytes < 1024) return bytes + ' байт';
@@ -185,6 +203,7 @@ function connectWebSocket() {
         console.log('WebSocket connected');
         setStatus(true);
         updateFirmwareButtons();
+        fetchEspAppVersion();
 
         setTimeout(() => {
             const now = new Date();
@@ -310,42 +329,40 @@ function connectWebSocket() {
                 {
                     const el = document.getElementById('fw-version');
                     if (el) el.textContent = msg.version || '—';
-                    setFwStatus('версия получена');
+                    /* статус не трогаем — там может быть результат 0x008A */
                 }
                 break;
 
             case 'firmwareUploadStart':
                 fwUploadInProgress = true;
                 updateFirmwareButtons();
-                setFwStatus('передача по UART (0x65)…');
+                setFwStatus('идёт отправка…');
                 if (typeof msg.size === 'number' && msg.size > 0) {
                     updateFwProgress(0, msg.size);
                 }
                 break;
 
-            /* Временно: дамп пакетов 0x65 / попытки — только console */
             case 'firmwareDebug':
-                console.log('[FW 0x65]', msg.msg || msg);
+                console.log('[FW]', msg.msg || msg);
                 break;
 
             case 'firmwareProgress':
                 fwUploadInProgress = true;
                 updateFwProgress(msg.received || 0, msg.total || 0);
-                {
-                    const tot = msg.total || 0;
-                    const rec = msg.received || 0;
-                    const pct = tot > 0 ? Math.round((rec / tot) * 100) : 0;
-                    setFwStatus('передача 0x65: ' + pct + '%');
-                }
+                /* статус не спамим процентами */
                 break;
 
             case 'firmwareUploadComplete':
                 fwUploadInProgress = false;
                 fwFileReady = true;
-                if (typeof msg.size === 'number') {
+                if (typeof msg.size === 'number' && msg.size > 0) {
                     updateFwProgress(msg.size, msg.size);
                 }
-                setFwStatus('файл отправлен (0x65 OK)');
+                if (msg.target === 'esp' || msg.reboot) {
+                    setFwStatus('статус OK — ESP перезагружается…');
+                } else {
+                    setFwStatus('файл отправлен, запуск перепрошивки…');
+                }
                 updateFirmwareButtons();
                 break;
 
@@ -353,7 +370,7 @@ function connectWebSocket() {
                 fwUploadInProgress = false;
                 fwFileReady = false;
                 {
-                    let t = 'ошибка 0x65';
+                    let t = 'ошибка отправки файла';
                     if (msg.msg) t += ': ' + msg.msg;
                     if (typeof msg.offset === 'number') t += ' @' + msg.offset;
                     setFwStatus(t);
@@ -362,15 +379,22 @@ function connectWebSocket() {
                 break;
 
             case 'reflashStarted':
-                setFwStatus('FC 0x06 отправлена (код 0x20), опрос 0x008A…');
+                setFwStatus('Команда на перепрограммирвоание отправлена , опрос статуса …');
                 break;
 
             case 'reflashStatus':
                 {
                     const c = (typeof msg.code === 'number') ? msg.code : -1;
                     const m = msg.msg || '';
-                    /* Поле «Статус» на вкладке перепрошивки */
-                    setFwStatus('0x008A: ' + c + (m ? ' — ' + m : ''));
+                    if (c === 7) {
+                        setFwStatus('идёт процесс перепрограммирования…');
+                    } else if (c === -2) {
+                        setFwStatus(m || 'ожидание ответа КСУ…');
+                    } else if (c < 0) {
+                        setFwStatus(m || 'ошибка опроса статуса');
+                    } else {
+                        setFwStatus((m ? m : ('код ' + c)));
+                    }
                     console.log('[FW reflash 0x008A]', c, m);
                 }
                 break;
@@ -869,6 +893,8 @@ document.addEventListener('DOMContentLoaded', () => {
     connectWebSocket();
     const fwInput = document.getElementById('fw-file-input');
     if (fwInput) fwInput.addEventListener('change', onFirmwareFileSelected);
+    if (typeof onFwTargetChange === 'function') onFwTargetChange();
+    fetchEspAppVersion();
     updateFirmwareButtons();
     window.addEventListener('resize', resizeTerminal);
     if (window.ResizeObserver && container) {
@@ -913,13 +939,63 @@ function updateFwProgress(received, total) {
     if (pctEl) pctEl.textContent = pctStr;
 }
 
+function getFwTarget() {
+    const el = document.getElementById('fw-target');
+    return (el && el.value === 'esp') ? 'esp' : 'ksu';
+}
+
+function onFwTargetChange() {
+    const target = getFwTarget();
+    const input = document.getElementById('fw-file-input');
+    const label = document.getElementById('fw-file-label');
+    const btnRf = document.getElementById('btn-fw-reflash');
+    const verRow = document.getElementById('fw-version-row');
+    const btnUp = document.getElementById('btn-fw-upload');
+
+    fwSelectedFile = null;
+    fwFileReady = false;
+    if (input) {
+        input.value = '';
+        if (target === 'esp') {
+            input.accept = '.bin,application/octet-stream';
+        } else {
+            input.accept = '.ubt,application/octet-stream';
+        }
+    }
+    if (label) {
+        label.textContent = target === 'esp'
+            ? 'Файл прошивки ESP (.bin):'
+            : 'Файл прошивки КСУ (.ubt):';
+    }
+    const nameEl = document.getElementById('fw-file-name');
+    const sizeEl = document.getElementById('fw-file-size');
+    if (nameEl) nameEl.textContent = '—';
+    if (sizeEl) sizeEl.textContent = '—';
+    if (btnUp) {
+        btnUp.textContent = target === 'esp'
+            ? 'Прошить ESP'
+            : 'Отправить и перепрошить';
+    }
+    /* FC06 только для КСУ */
+    if (btnRf) btnRf.style.display = target === 'esp' ? 'none' : '';
+    if (verRow) verRow.style.display = target === 'esp' ? 'none' : '';
+    updateFwProgress(0, 0);
+    setFwStatus(target === 'esp' ? 'цель: ESP32' : 'цель: КСУ');
+    updateFirmwareButtons();
+}
+
 function updateFirmwareButtons() {
     const btnUp = document.getElementById('btn-fw-upload');
     const btnRf = document.getElementById('btn-fw-reflash');
     const wsOk = !!(ws && ws.readyState === WebSocket.OPEN);
     const canUpload = !!(fwSelectedFile && fwSelectedFile.size > 0 && !fwUploadInProgress);
     if (btnUp) btnUp.disabled = !canUpload;
-    if (btnRf) btnRf.disabled = !wsOk || fwUploadInProgress;
+    /* Повтор FC06 — только КСУ */
+    if (btnRf) {
+        const isKsu = getFwTarget() === 'ksu';
+        btnRf.disabled = !isKsu || !wsOk || fwUploadInProgress;
+        btnRf.style.display = isKsu ? '' : 'none';
+    }
 }
 
 function requestFirmwareVersion() {
@@ -936,10 +1012,17 @@ function requestFirmwareVersion() {
 function onFirmwareFileSelected(ev) {
     const input = ev.target;
     let f = input.files && input.files[0] ? input.files[0] : null;
-    if (f && !/\.ubt$/i.test(f.name)) {
-        alert('Нужен файл с расширением .ubt');
-        input.value = '';
-        f = null;
+    const target = getFwTarget();
+    if (f) {
+        if (target === 'esp' && !/\.bin$/i.test(f.name)) {
+            alert('Для ESP нужен файл .bin (build/esp32_MK3_vX.Y.Z.bin)');
+            input.value = '';
+            f = null;
+        } else if (target === 'ksu' && !/\.ubt$/i.test(f.name)) {
+            alert('Для КСУ нужен файл с расширением .ubt');
+            input.value = '';
+            f = null;
+        }
     }
     fwSelectedFile = f;
     fwFileReady = false;
@@ -958,33 +1041,39 @@ function onFirmwareFileSelected(ev) {
             ' (' + f.size + ')';
         if (chooseBtn) chooseBtn.textContent = 'Сменить файл';
         updateFwProgress(0, f.size);
-        setFwStatus('файл выбран (.ubt)');
+        setFwStatus(target === 'esp' ? 'файл выбран (.bin)' : 'файл выбран (.ubt)');
     }
     updateFirmwareButtons();
 }
 
 /**
- * POST /firmware → ESP режет файл и шлёт FC 0x65 по UART.
- * Прогресс-бар обновляется в основном из WS firmwareProgress (после каждой порции),
- * XHR upload.onprogress — запасной канал (браузер→ESP).
+ * КСУ → POST /firmware (0x65 + FC06)
+ * ESP → POST /ota (запись в ota-слот + reboot)
  */
 function uploadFirmware() {
     if (!fwSelectedFile || fwSelectedFile.size <= 0 || fwUploadInProgress) return;
+    const target = getFwTarget();
     fwUploadInProgress = true;
     fwFileReady = false;
     updateFirmwareButtons();
-    setFwStatus('передача по UART (0x65)…');
+    setFwStatus(target === 'esp' ? 'идёт OTA ESP…' : 'идёт отправка…');
     window._fwProgRecv = 0;
     window._fwProgTotal = fwSelectedFile.size;
     updateFwProgress(0, fwSelectedFile.size);
 
+    const url = target === 'esp' ? '/ota' : '/firmware';
     const xhr = new XMLHttpRequest();
-    xhr.open('POST', '/firmware', true);
+    xhr.open('POST', url, true);
     xhr.responseType = 'text';
     xhr.setRequestHeader('Content-Type', 'application/octet-stream');
 
-    /* Прогресс только с ESP (firmwareProgress по UART), XHR не трогаем бар —
-       иначе скачет: браузер уже «залил» SoftAP, а UART ещё в начале. */
+    /* Для ESP прогресс можно брать и с XHR (запись = приём HTTP) */
+    if (target === 'esp') {
+        xhr.upload.onprogress = function (ev) {
+            if (!ev.lengthComputable) return;
+            updateFwProgress(ev.loaded, ev.total || fwSelectedFile.size);
+        };
+    }
 
     xhr.onload = function () {
         if (xhr.status >= 200 && xhr.status < 300) {
@@ -992,8 +1081,11 @@ function uploadFirmware() {
             if (fwUploadInProgress) {
                 fwUploadInProgress = false;
                 updateFwProgress(fwSelectedFile.size, fwSelectedFile.size);
-                /* FC 0x06 + статус 0x008A запускаются на ESP после 0x65 */
-                setFwStatus('0x65 OK → авто FC06 (код 0x20), ждём 0x008A…');
+                if (target === 'esp') {
+                    setFwStatus('статус OK — ESP перезагружается…');
+                } else {
+                    setFwStatus('файл отправлен, запуск перепрошивки…');
+                }
             }
         } else {
             fwUploadInProgress = false;
@@ -1007,16 +1099,7 @@ function uploadFirmware() {
                 detail = (xhr.responseText || '').slice(0, 120);
             }
             setFwStatus('ошибка HTTP ' + xhr.status + (detail ? ': ' + detail : ''));
-            let hint = '';
-            if (/0x21/i.test(detail) || /IRZ reject/i.test(detail) || /illegal function/i.test(detail)) {
-                hint = '\n\nКСУ отклонил FC 0x65.\n' +
-                    '1) На КСУ тип Modbus = «ИРЗ»\n' +
-                    '2) ПО КСУ ≥ 6.2.2369\n' +
-                    '3) Файл: 16 байт header (mfg=54) + тело + FFFFFFFF\n' +
-                    '4) В консоли ищи строку «FW hdr: …» — там разбор заголовка';
-            }
-            alert('Не удалось отправить файл: HTTP ' + xhr.status +
-                  (detail ? '\n' + detail : '') + hint);
+            alert('Не удалось прошить: HTTP ' + xhr.status + (detail ? '\n' + detail : ''));
         }
         updateFirmwareButtons();
     };
@@ -1024,8 +1107,13 @@ function uploadFirmware() {
     xhr.onerror = function () {
         fwUploadInProgress = false;
         fwFileReady = false;
-        setFwStatus('ошибка сети');
-        alert('Не удалось отправить файл (сеть)');
+        /* после OTA reboot соединение рвётся — для esp это может быть норма */
+        if (target === 'esp') {
+            setFwStatus('связь оборвалась (возможна перезагрузка ESP)');
+        } else {
+            setFwStatus('ошибка сети');
+            alert('Не удалось отправить файл (сеть)');
+        }
         updateFirmwareButtons();
     };
 
@@ -1039,7 +1127,16 @@ function uploadFirmware() {
     xhr.send(fwSelectedFile);
 }
 
+/** Код устройства FC 0x06: 0x20 (hex) = 32 (dec) — КСУ Linux */
+function getFwDeviceCode() {
+    return 0x20;
+}
+
 function startReflash() {
+    if (getFwTarget() !== 'ksu') {
+        alert('Команда на перепрошику только для КСУ');
+        return;
+    }
     if (!ws || ws.readyState !== WebSocket.OPEN) {
         alert('Нет соединения WebSocket');
         return;
@@ -1049,10 +1146,10 @@ function startReflash() {
         return;
     }
     const code = 0x20;
-    if (!confirm('Отправить FC 0x06 (код 0x20 / 32) и прочитать статус 0x008A?')) return;
+    if (!confirm('Отправить команду на перепрошивку?')) return;
     try {
         ws.send(JSON.stringify({ action: 'startReflash', code: code }));
-        setFwStatus('команда перепрошивки (код 0x20)…');
+        setFwStatus('команда перепрошивки…');
     } catch (e) {
         alert('Ошибка отправки команды');
     }
@@ -1066,3 +1163,4 @@ window.stopDownload = stopDownload;
 window.requestFirmwareVersion = requestFirmwareVersion;
 window.uploadFirmware = uploadFirmware;
 window.startReflash = startReflash;
+window.onFwTargetChange = onFwTargetChange;

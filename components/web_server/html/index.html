@@ -12,7 +12,10 @@
 <body>
 
 <div class="topbar">
-    <div>ESP32 TERMINAL</div>
+    <div class="topbar-title">
+        ESP32 TERMINAL
+        <span id="esp-app-ver" class="app-ver" title="Версия прошивки ESP">v—</span>
+    </div>
     <div class="status">
         <div id="dot" class="dot"></div>
         <div id="status">Disconnected</div>
@@ -114,13 +117,21 @@
 <div id="firmware-page" class="page">
     <div class="download-panel firmware-panel">
         <div class="download-row">
-            <label>Версия прошивки (UART):</label>
+            <label>Устройство:</label>
+            <select id="fw-target" class="fw-target-select" onchange="onFwTargetChange()">
+                <option value="ksu" selected>КСУ</option>
+                <option value="esp">ESP32</option>
+            </select>
+        </div>
+
+        <div class="download-row" id="fw-version-row">
+            <label>Версия прошивки:</label>
             <span id="fw-version" class="value">—</span>
             <button type="button" id="btn-fw-refresh-ver" class="btn-secondary" onclick="requestFirmwareVersion()">Обновить</button>
         </div>
 
         <div class="download-row fw-file-row">
-            <label>Файл прошивки (.ubt):</label>
+            <label id="fw-file-label">Файл прошивки (.ubt):</label>
             <input type="file" id="fw-file-input" accept=".ubt,application/octet-stream" hidden />
             <button type="button" id="btn-fw-choose" class="btn-secondary" onclick="document.getElementById('fw-file-input').click()">Выбрать файл</button>
         </div>
@@ -136,8 +147,8 @@
         </div>
 
         <div class="download-actions">
-            <button id="btn-fw-upload" class="btn-start-download" onclick="uploadFirmware()" disabled>Отправить и перепрошить</button>
-            <button id="btn-fw-reflash" class="btn-reflash" onclick="startReflash()" disabled>Повторить FC06 / статус</button>
+            <button id="btn-fw-upload" class="btn-start-download" onclick="uploadFirmware()" disabled>Отправить файл</button>
+            <button id="btn-fw-reflash" class="btn-reflash" onclick="startReflash()" disabled>Команда на перепрошивку</button>
         </div>
 
         <div class="progress-container fw-progress-container" id="fw-progress-wrap">

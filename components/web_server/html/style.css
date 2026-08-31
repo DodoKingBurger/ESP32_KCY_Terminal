@@ -31,9 +31,18 @@ body {
     padding: 0 10px;
     flex-shrink: 0;
 }
-.topbar > div:first-child {
+.topbar-title {
     font-size: 14px;
     white-space: nowrap;
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+}
+.app-ver {
+    font-size: 12px;
+    font-weight: 500;
+    color: #93c5fd;
+    opacity: 0.95;
 }
 .status {
     display: flex;

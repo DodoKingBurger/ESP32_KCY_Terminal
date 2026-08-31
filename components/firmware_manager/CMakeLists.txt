@@ -1,5 +1,7 @@
 idf_component_register(
-    SRCS "firmware_manager.c"
+    SRCS
+        "firmware_manager.c"
+        "esp_ota_update.c"
     INCLUDE_DIRS "."
     REQUIRES
         freertos
@@ -7,4 +9,6 @@ idf_component_register(
         log
         web_server
         uart_bridge
+        app_update
+        esp_app_format
 )

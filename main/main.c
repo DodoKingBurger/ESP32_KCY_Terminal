@@ -16,6 +16,8 @@
 #include "web_server.h"
 #include "modbus_poll.h"
 
+#define CAPTIVE_PORTAL      FALSE
+
 static const char *TAG = "MAIN";
 
 /**
@@ -44,9 +46,11 @@ void app_main(void)
     wifi_manager_start();
     ESP_LOGI(TAG, "WiFi started");
 
+    #if CAPTIVE_PORTAL
     // 5. Запуск DNS
-    //dns_server_start();
-    //ESP_LOGI(TAG, "DNS started");
+    dns_server_start();
+    ESP_LOGI(TAG, "DNS started");
+    #endif
 
     // 6. Запуск веб-сервера
     web_server_start();

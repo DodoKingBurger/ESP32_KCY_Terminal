@@ -1,5 +1,6 @@
 
 #include "firmware_manager.h"
+#include "esp_ota_update.h"
 #include "web_server.h"
 #include "modbus_master.h"
 #include "uart_bridge.h"
@@ -177,7 +178,8 @@ static bool firmware_write_chunk_uart(const uint8_t *data, size_t len, uint32_t 
  */
 bool firmware_manager_send_reflash_command(void)
 {
-    uint16_t code = 1;
+    /* 0x20 = КСУ Linux (hex), в пакете value = 00 20 */
+    uint16_t code = FW_DEVICE_CODE_KSULINUX;
 
     uint8_t req[8];
     req[0] = (uint8_t)SLAVE_ID;
@@ -323,26 +325,22 @@ static void publish_version(void)
 }
 
 /**
- * Опрос 0x008A:
- *  - один раз сразу;
- *  - если код 7 («идёт прошивка») — до 5 дополнительных запросов, пока не станет ≠7;
- *  - при 0/ошибке — сразу стоп;
- *  - при успехе (0) — обновить «Версия прошивки».
+ * После FC06: опрос 0x008A, пока код == 7 («идёт процесс»);
+ * любой другой код → статус + обновить «Версия прошивки».
  */
 static void poll_reflash_status_smart(void)
 {
     int code = publish_reflash_status();
-    int extra = 0;
-    while (code == 7 && extra < 5) {
-        vTaskDelay(pdMS_TO_TICKS(800));
+    int n = 0;
+    while (code == 7 && n < 120) {
+        vTaskDelay(pdMS_TO_TICKS(1000));
         code = publish_reflash_status();
-        extra++;
+        n++;
     }
-    if (code == 0) {
-        send_log("Reflash OK (0x008A=0), updating firmware version");
-        vTaskDelay(pdMS_TO_TICKS(300));
-        publish_version();
-    }
+
+    vTaskDelay(pdMS_TO_TICKS(300));
+    send_log("Reflash finished, updating firmware version");
+    publish_version();
 }
 
 /* ===== HTTP POST /firmware =====
@@ -351,7 +349,7 @@ static void poll_reflash_status_smart(void)
  */
 esp_err_t firmware_manager_http_upload_handler(httpd_req_t *req)
 {
-    if (fw_busy) {
+    if (fw_busy || esp_ota_update_is_busy()) {
         httpd_resp_set_status(req, "409 Conflict");
         httpd_resp_set_hdr(req, "Connection", "close");
         httpd_resp_sendstr(req, "Firmware transfer busy");
@@ -492,21 +490,19 @@ esp_err_t firmware_manager_http_upload_handler(httpd_req_t *req)
         send_log("Firmware upload complete");
 
         /*
-         * После успешной 0x65 — автоматически FC 0x06 (код устройства 20),
-         * затем читаем статус 0x008A (несколько раз: 7 = идёт прошивка).
+         * После 0x65 → FC 0x06 (0x20) → пинг → опрос 0x008A до кода ≠7 → версия.
          */
-        /* Пауза после длинной 0x65 — КСУ нужно «отдышаться» перед FC06 */
         vTaskDelay(pdMS_TO_TICKS(800));
         send_log("Auto-reflash: FC 0x06 value=0x20 (32 dec)");
-        //if (firmware_manager_send_reflash_command()) {
-            //web_server_send("{\"type\":\"reflashStarted\",\"code\":32}");
-            //vTaskDelay(pdMS_TO_TICKS(500));
-            //poll_reflash_status_smart();
-        //} else {
-        //    web_server_send(
-        //        "{\"type\":\"error\",\"msg\":\"0x65 OK, but FC06 reflash failed\"}");
-        //    send_log("Auto-reflash FC06 failed");
-        //}
+        if (firmware_manager_send_reflash_command()) {
+            web_server_send("{\"type\":\"reflashStarted\",\"code\":32}");
+            vTaskDelay(pdMS_TO_TICKS(500));
+            poll_reflash_status_smart();
+        } else {
+            web_server_send(
+                "{\"type\":\"error\",\"msg\":\"0x65 OK, but FC06 reflash failed\"}");
+            send_log("Auto-reflash FC06 failed");
+        }
     } else {
         /* msg без кавычек/слэшей — чтобы JSON не ломался */
         char safe[96];

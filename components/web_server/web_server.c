@@ -3,11 +3,18 @@
 #include "modbus_poll.h"
 #include "archive_manager.h"
 #include "firmware_manager.h"
+#include "esp_ota_update.h"
 #include "esp_http_server.h"
 #include "esp_log.h"
+#include "esp_app_desc.h"
+/* build/esp_fw_version.h — генерируется scripts/bump_version.py при каждой сборке */
+#if __has_include("esp_fw_version.h")
+#include "esp_fw_version.h"
+#endif
 #include <string.h>
 #include <stdarg.h>
 #include <stdlib.h>
+#include <stdio.h>
 #include <time.h>
 #include <sys/time.h>
 #include "esp_timer.h"
@@ -34,7 +41,7 @@ static esp_err_t ws_handler           (httpd_req_t *req);
 static esp_err_t xterm_js_handler     (httpd_req_t *req);
 static esp_err_t xterm_css_handler    (httpd_req_t *req);
 static esp_err_t favicon_handler      (httpd_req_t *req);
-static TaskHandle_t ws_ping_task_handle = NULL;
+static esp_err_t version_get_handler  (httpd_req_t *req);
 
 /**
  * @brief Отправляет текстовое сообщение через WebSocket текущему владельцу терминала
@@ -142,6 +149,28 @@ static esp_err_t favicon_handler(httpd_req_t *req)
         return httpd_resp_send(req, NULL, 0);
 }
 
+/** GET /version — версия ESP (сборка: ESP_FW_VERSION_STR, иначе app_desc) */
+static esp_err_t version_get_handler(httpd_req_t *req)
+{
+    const esp_app_desc_t *app = esp_app_get_description();
+#if defined(ESP_FW_VERSION_STR)
+    const char *ver = ESP_FW_VERSION_STR;
+#else
+    const char *ver = (app && app->version[0]) ? app->version : "?";
+#endif
+    char body[192];
+    snprintf(body, sizeof(body),
+             "{\"version\":\"%s\",\"name\":\"%s\",\"date\":\"%s\",\"time\":\"%s\"}",
+             ver,
+             app && app->project_name[0] ? app->project_name : "uart_echo",
+             app ? app->date : "",
+             app ? app->time : "");
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    return httpd_resp_sendstr(req, body);
+}
+
+#if DNS_ON
 /**
  * @brief Обработчик ошибки 404 – перенаправляет клиента на корень (http://192.168.4.1/).
  * @param req указатель на запрос
@@ -154,6 +183,7 @@ static esp_err_t redirect_to_root(httpd_req_t *req, httpd_err_code_t err)
     httpd_resp_set_hdr(req, "Location", "http://192.168.4.1/");
     return httpd_resp_send(req, NULL, 0);
 }
+#endif
 
 /**
  * @brief Вызывается при отключении WebSocket / Wi-Fi-клиента.
@@ -316,6 +346,7 @@ void web_server_start(void)
     // ===== ИНИЦИАЛИЗИРУЕМ archive_manager =====
     archive_manager_init();
     firmware_manager_init();
+    esp_ota_update_init();
 
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port          = 80;
@@ -355,6 +386,12 @@ void web_server_start(void)
         .method = HTTP_POST,
         .handler = firmware_manager_http_upload_handler
     });
+    /* OTA самой ESP32 (app .bin) — не пересекается с /firmware (КСУ) */
+    httpd_register_uri_handler(server, &(httpd_uri_t){
+        .uri = "/ota",
+        .method = HTTP_POST,
+        .handler = esp_ota_update_http_handler
+    });
 
     httpd_register_uri_handler(server, &(httpd_uri_t){ .uri = "/style.css", .method = HTTP_GET, .handler = style_css_handler });
     httpd_register_uri_handler(server, &(httpd_uri_t){ .uri = "/script.js", .method = HTTP_GET, .handler = script_js_handler });
@@ -365,11 +402,13 @@ void web_server_start(void)
     httpd_register_uri_handler(server, &(httpd_uri_t){ .uri = "/ws",        .method = HTTP_GET, .handler = ws_handler,        .is_websocket = true });
 
     httpd_register_uri_handler(server, &(httpd_uri_t){ .uri = "/favicon.ico", .method = HTTP_GET, .handler = favicon_handler });
+    httpd_register_uri_handler(server, &(httpd_uri_t){ .uri = "/version", .method = HTTP_GET, .handler = version_get_handler });
+    #if CAPTIVE_PORTAL
     //Captive portal переадресация
-    //httpd_register_uri_handler(server, &(httpd_uri_t){ .uri = "/generate_204", .method = HTTP_GET, .handler = root_get_handler });
-    //httpd_register_uri_handler(server, &(httpd_uri_t){ .uri = "/hotspot-detect.html", .method = HTTP_GET, .handler = root_get_handler });
-    //httpd_register_uri_handler(server, &(httpd_uri_t){ .uri = "/library/test/success.html", .method = HTTP_GET, .handler = root_get_handler });
-
+        httpd_register_uri_handler(server, &(httpd_uri_t){ .uri = "/generate_204", .method = HTTP_GET, .handler = root_get_handler });
+        httpd_register_uri_handler(server, &(httpd_uri_t){ .uri = "/hotspot-detect.html", .method = HTTP_GET, .handler = root_get_handler });
+        httpd_register_uri_handler(server, &(httpd_uri_t){ .uri = "/library/test/success.html", .method = HTTP_GET, .handler = root_get_handler });
+    #endif
     web_client_connected = true;
     ESP_LOGI("HTTP", "Captive portal enabled");
 }
