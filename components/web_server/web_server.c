@@ -5,6 +5,7 @@
 #include "firmware_manager.h"
 #include "esp_ota_update.h"
 #include "esp_http_server.h"
+#include "portal_config.h"
 #include "esp_log.h"
 #include "esp_app_desc.h"
 /* build/esp_fw_version.h — генерируется scripts/bump_version.py при каждой сборке */
@@ -42,6 +43,7 @@ static esp_err_t xterm_js_handler     (httpd_req_t *req);
 static esp_err_t xterm_css_handler    (httpd_req_t *req);
 static esp_err_t favicon_handler      (httpd_req_t *req);
 static esp_err_t version_get_handler  (httpd_req_t *req);
+static TaskHandle_t ws_ping_task_handle = NULL;
 
 /**
  * @brief Отправляет текстовое сообщение через WebSocket текущему владельцу терминала
@@ -149,6 +151,24 @@ static esp_err_t favicon_handler(httpd_req_t *req)
         return httpd_resp_send(req, NULL, 0);
 }
 
+/** Android/Chrome connectivity: быстрый 204 = «сеть есть», без минутного таймаута */
+static esp_err_t captive_204_handler(httpd_req_t *req)
+{
+    httpd_resp_set_status(req, "204 No Content");
+    httpd_resp_set_hdr(req, "Connection", "close");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    return httpd_resp_send(req, NULL, 0);
+}
+
+/** iOS / Windows probe — короткий ответ, без ожидания интернета */
+static esp_err_t captive_ok_handler(httpd_req_t *req)
+{
+    httpd_resp_set_type(req, "text/plain");
+    httpd_resp_set_hdr(req, "Connection", "close");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    return httpd_resp_sendstr(req, "Success");
+}
+
 /** GET /version — версия ESP (сборка: ESP_FW_VERSION_STR, иначе app_desc) */
 static esp_err_t version_get_handler(httpd_req_t *req)
 {
@@ -170,7 +190,6 @@ static esp_err_t version_get_handler(httpd_req_t *req)
     return httpd_resp_sendstr(req, body);
 }
 
-#if DNS_ON
 /**
  * @brief Обработчик ошибки 404 – перенаправляет клиента на корень (http://192.168.4.1/).
  * @param req указатель на запрос
@@ -183,7 +202,6 @@ static esp_err_t redirect_to_root(httpd_req_t *req, httpd_err_code_t err)
     httpd_resp_set_hdr(req, "Location", "http://192.168.4.1/");
     return httpd_resp_send(req, NULL, 0);
 }
-#endif
 
 /**
  * @brief Вызывается при отключении WebSocket / Wi-Fi-клиента.
@@ -358,7 +376,7 @@ void web_server_start(void)
     config.keep_alive_idle      = 5;
     config.keep_alive_interval  = 3;
     config.keep_alive_count     = 3;
-    config.max_uri_handlers     = 20;
+    config.max_uri_handlers     = 28;
     config.stack_size           = 12288;
 
     if (httpd_start(&server, &config) != ESP_OK) {
@@ -403,12 +421,26 @@ void web_server_start(void)
 
     httpd_register_uri_handler(server, &(httpd_uri_t){ .uri = "/favicon.ico", .method = HTTP_GET, .handler = favicon_handler });
     httpd_register_uri_handler(server, &(httpd_uri_t){ .uri = "/version", .method = HTTP_GET, .handler = version_get_handler });
-    #if CAPTIVE_PORTAL
-    //Captive portal переадресация
-        httpd_register_uri_handler(server, &(httpd_uri_t){ .uri = "/generate_204", .method = HTTP_GET, .handler = root_get_handler });
-        httpd_register_uri_handler(server, &(httpd_uri_t){ .uri = "/hotspot-detect.html", .method = HTTP_GET, .handler = root_get_handler });
-        httpd_register_uri_handler(server, &(httpd_uri_t){ .uri = "/library/test/success.html", .method = HTTP_GET, .handler = root_get_handler });
-    #endif
+
+    /* Captive / connectivity probes — быстрый ответ, чтобы ОС не ждала интернет */
+    /*
+     * Ускорение «проверки сети» всегда:
+     * телефон получает быстрый 204/Success и не ждёт таймаут интернета.
+     */
+    httpd_register_uri_handler(server, &(httpd_uri_t){ .uri = "/generate_204", .method = HTTP_GET, .handler = captive_204_handler });
+    httpd_register_uri_handler(server, &(httpd_uri_t){ .uri = "/gen_204", .method = HTTP_GET, .handler = captive_204_handler });
+    httpd_register_uri_handler(server, &(httpd_uri_t){ .uri = "/hotspot-detect.html", .method = HTTP_GET, .handler = captive_ok_handler });
+    httpd_register_uri_handler(server, &(httpd_uri_t){ .uri = "/library/test/success.html", .method = HTTP_GET, .handler = captive_ok_handler });
+    httpd_register_uri_handler(server, &(httpd_uri_t){ .uri = "/ncsi.txt", .method = HTTP_GET, .handler = captive_ok_handler });
+    httpd_register_uri_handler(server, &(httpd_uri_t){ .uri = "/connecttest.txt", .method = HTTP_GET, .handler = captive_ok_handler });
+
+#if CAPTIVE_PORTAL_ENABLE
+    /* Полный captive portal: 404 → редирект на корень */
+    httpd_register_err_handler(server, HTTPD_404_NOT_FOUND, redirect_to_root);
+    ESP_LOGI("HTTP", "Captive portal ON (CAPTIVE_PORTAL_ENABLE=1)");
+#else
+    ESP_LOGI("HTTP", "Captive portal OFF — fast probes only (CAPTIVE_PORTAL_ENABLE=0)");
+#endif
+
     web_client_connected = true;
-    ESP_LOGI("HTTP", "Captive portal enabled");
 }

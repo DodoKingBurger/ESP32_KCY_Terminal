@@ -13,10 +13,9 @@
 #include "uart_bridge.h"
 #include "wifi_manager.h"
 #include "dns_server.h"
+#include "portal_config.h"
 #include "web_server.h"
 #include "modbus_poll.h"
-
-#define CAPTIVE_PORTAL      FALSE
 
 static const char *TAG = "MAIN";
 
@@ -46,11 +45,13 @@ void app_main(void)
     wifi_manager_start();
     ESP_LOGI(TAG, "WiFi started");
 
-    #if CAPTIVE_PORTAL
-    // 5. Запуск DNS
+    // 5. DNS-перехват только в режиме captive portal
+#if CAPTIVE_PORTAL_ENABLE
     dns_server_start();
-    ESP_LOGI(TAG, "DNS started");
-    #endif
+    ESP_LOGI(TAG, "DNS (captive portal) started");
+#else
+    ESP_LOGI(TAG, "Captive portal DNS disabled (CAPTIVE_PORTAL_ENABLE=0)");
+#endif
 
     // 6. Запуск веб-сервера
     web_server_start();

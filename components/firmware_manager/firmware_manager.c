@@ -391,7 +391,6 @@ esp_err_t firmware_manager_http_upload_handler(httpd_req_t *req)
     int received = 0;
     uint32_t offset = 0;
     bool ok = true;
-    bool header_logged = false;
     modbus_status_t fail_st = MODBUS_OK;
     uint32_t fail_off = 0;
 
