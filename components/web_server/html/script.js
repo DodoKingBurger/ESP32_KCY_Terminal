@@ -10,7 +10,8 @@ let termCols = 80;
 let termRows = 24;
 
 const term = new Terminal({
-    cursorBlink: true,
+    cursorBlink: false,
+    cursorStyle: 'underline',
     cols: termCols,
     rows: termRows,
     convertEol: false,
@@ -20,7 +21,9 @@ const term = new Terminal({
     theme: {
         background: '#000000',
         foreground: '#00ff88',
-        cursor: '#00ff88'
+        /* Курсор не рисуем: экран КСУ сам показывает позицию */
+        cursor: '#000000',
+        cursorAccent: '#000000'
     }
 });
 
@@ -145,23 +148,48 @@ function parseLampState(text) {
 
 /**
  * Оригинальная обработка бинарного кадра экрана:
- *  - подмена проблемных байтов
+ *  - подмена байтов скроллбара на unicode-стрелки/ползунок
  *  - windows-1251
  *  - parse size / lamps
  *  - убрать null и CSI CUP
- *  - clear + home + write
+ *  - clear + home + write, курсор xterm скрыт
+ *
+ * КСУ: 0x80 = вверх, 0x81 = вниз, 0x7F = ползунок скроллбара
  */
 function writeTerminalScreen(arrayBuffer) {
     const bytes = new Uint8Array(arrayBuffer);
-    const filtered = bytes.map(b => {
-        if (b === 0x81) return 0x76;
-        if (b === 0x7F) return 0x30;
-        if (b === 0x80) return 0x5E;
-        return b;
-    }).filter(b => b !== 0x00);
-
     const decoder = new TextDecoder('windows-1251');
-    let text = decoder.decode(filtered);
+    let text = '';
+    let chunk = [];
+
+    const flushChunk = () => {
+        if (chunk.length === 0) return;
+        text += decoder.decode(Uint8Array.from(chunk));
+        chunk = [];
+    };
+
+    for (let i = 0; i < bytes.length; i++) {
+        const b = bytes[i];
+        if (b === 0x00) continue;
+        /* Символы ближе к реальному скроллбару (одна ячейка) */
+        if (b === 0x80) {
+            flushChunk();
+            text += '▲'; /* вверх */
+            continue;
+        }
+        if (b === 0x81) {
+            flushChunk();
+            text += '▼'; /* вниз */
+            continue;
+        }
+        if (b === 0x7F) {
+            flushChunk();
+            text += '█'; /* ползунок */
+            continue;
+        }
+        chunk.push(b);
+    }
+    flushChunk();
 
     parseTerminalSize(text);
     parseLampState(text);
@@ -171,6 +199,7 @@ function writeTerminalScreen(arrayBuffer) {
 
     term.write('\x1b[2J\x1b[H');
     term.write(text);
+    term.write('\x1b[?25l'); /* hide cursor — без рамки на последнем символе */
 }
 
 // -------------------- WebSocket --------------------
@@ -359,7 +388,7 @@ function connectWebSocket() {
                     updateFwProgress(msg.size, msg.size);
                 }
                 if (msg.target === 'esp' || msg.reboot) {
-                    setFwStatus('статус OK — ESP перезагружается…');
+                    setFwStatus('OTA OK — ESP перезагружается…');
                 } else {
                     setFwStatus('файл отправлен, запуск перепрошивки…');
                 }
@@ -370,7 +399,7 @@ function connectWebSocket() {
                 fwUploadInProgress = false;
                 fwFileReady = false;
                 {
-                    let t = 'ошибка отправки файла';
+                    let t = 'ошибка 0x65';
                     if (msg.msg) t += ': ' + msg.msg;
                     if (typeof msg.offset === 'number') t += ' @' + msg.offset;
                     setFwStatus(t);
@@ -379,7 +408,7 @@ function connectWebSocket() {
                 break;
 
             case 'reflashStarted':
-                setFwStatus('Команда на перепрограммирвоание отправлена , опрос статуса …');
+                setFwStatus('FC 0x06 отправлена (код 0x20), опрос 0x008A…');
                 break;
 
             case 'reflashStatus':
@@ -973,14 +1002,14 @@ function onFwTargetChange() {
     if (sizeEl) sizeEl.textContent = '—';
     if (btnUp) {
         btnUp.textContent = target === 'esp'
-            ? 'Прошить ESP'
+            ? 'Прошить ESP (OTA)'
             : 'Отправить и перепрошить';
     }
     /* FC06 только для КСУ */
     if (btnRf) btnRf.style.display = target === 'esp' ? 'none' : '';
     if (verRow) verRow.style.display = target === 'esp' ? 'none' : '';
     updateFwProgress(0, 0);
-    setFwStatus(target === 'esp' ? 'цель: ESP32' : 'цель: КСУ');
+    setFwStatus(target === 'esp' ? 'цель: ESP32 (OTA)' : 'цель: КСУ');
     updateFirmwareButtons();
 }
 
@@ -1015,7 +1044,7 @@ function onFirmwareFileSelected(ev) {
     const target = getFwTarget();
     if (f) {
         if (target === 'esp' && !/\.bin$/i.test(f.name)) {
-            alert('Для ESP нужен файл .bin (build/esp32_MK3_vX.Y.Z.bin)');
+            alert('Для ESP нужен файл .bin (build/uart_echo.bin)');
             input.value = '';
             f = null;
         } else if (target === 'ksu' && !/\.ubt$/i.test(f.name)) {
@@ -1082,7 +1111,7 @@ function uploadFirmware() {
                 fwUploadInProgress = false;
                 updateFwProgress(fwSelectedFile.size, fwSelectedFile.size);
                 if (target === 'esp') {
-                    setFwStatus('статус OK — ESP перезагружается…');
+                    setFwStatus('OTA OK — ESP перезагружается…');
                 } else {
                     setFwStatus('файл отправлен, запуск перепрошивки…');
                 }
@@ -1134,7 +1163,7 @@ function getFwDeviceCode() {
 
 function startReflash() {
     if (getFwTarget() !== 'ksu') {
-        alert('Команда на перепрошику только для КСУ');
+        alert('FC 0x06 только для КСУ');
         return;
     }
     if (!ws || ws.readyState !== WebSocket.OPEN) {
@@ -1146,10 +1175,10 @@ function startReflash() {
         return;
     }
     const code = 0x20;
-    if (!confirm('Отправить команду на перепрошивку?')) return;
+    if (!confirm('Отправить FC 0x06 (код 0x20 / 32) и прочитать статус 0x008A?')) return;
     try {
         ws.send(JSON.stringify({ action: 'startReflash', code: code }));
-        setFwStatus('команда перепрошивки…');
+        setFwStatus('команда перепрошивки (код 0x20)…');
     } catch (e) {
         alert('Ошибка отправки команды');
     }
