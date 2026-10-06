@@ -16,6 +16,7 @@
 #include "portal_config.h"
 #include "web_server.h"
 #include "modbus_poll.h"
+#include "terminal_tcp.h"
 
 static const char *TAG = "MAIN";
 
@@ -60,6 +61,10 @@ void app_main(void)
     // 7. Запуск задачи терминала
     terminal_task_start();
     ESP_LOGI(TAG, "Terminal task started");
+
+    // 8. Raw TCP bridge for IRZ-Terminal (port 8888), optional; does not affect WS portal
+    terminal_tcp_start();
+    ESP_LOGI(TAG, "Terminal TCP bridge started (port %d)", TERMINAL_TCP_PORT);
 
     ESP_LOGI(TAG, "=== ALL SYSTEMS GO ===");
     ESP_LOGI(TAG, "Free heap: %d", esp_get_free_heap_size());

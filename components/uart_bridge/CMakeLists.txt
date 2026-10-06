@@ -4,8 +4,8 @@ idf_component_register(
         "modbus_master.c"
         "mbcrc.c"
         "parser.c"
-       
         "modbus_poll.c"
+        "terminal_tcp.c"
     INCLUDE_DIRS "."
     REQUIRES 
         driver 
@@ -15,4 +15,5 @@ idf_component_register(
         freertos
         web_server 
         archive_manager
+        lwip
 )

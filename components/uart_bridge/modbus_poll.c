@@ -3,6 +3,7 @@
 #include "web_server.h"
 #include "uart_bridge.h"
 #include "mbcrc.h"
+#include "terminal_tcp.h"
 #include <string.h>
 
 #include "freertos/FreeRTOS.h"
@@ -347,15 +348,94 @@ void modbus_poll_task(void *arg) {
  * @param arg не используется
  * @details Пропускает итерации, если идёт загрузка архива (download_in_progress).
  */
+/**
+ * Кадр для IRZ-Terminal — максимально как writeTerminalScreen() в script.js:
+ *  - ESC[2J ESC[H (clear + home)
+ *  - пропуск 0x00
+ *  - скроллбар 0x80/0x81/0x7F → ASCII
+ *  - вырезать CSI CUP/HVP (ESC[…H / ESC[…f) — иначе CharacterWidget
+ *    с чужим размером сетки даёт «лишний отступ» / съезд
+ *  - SGR (цвета, underline), LED (q), SCR (8;…t) — оставить
+ *  - размер НЕ форсируем (80x25 убран): как HTML — из SCR в кадре,
+ *    иначе default приложения (40x15)
+ * WebSocket: по-прежнему сырой кадр.
+ */
+static size_t terminal_format_screen_for_irz(const uint8_t *in, size_t in_len,
+                                            uint8_t *out, size_t out_max)
+{
+    if (in == NULL || out == NULL || out_max < 8) {
+        return 0;
+    }
+
+    size_t o = 0;
+    static const uint8_t prefix[] = {
+        0x1B, '[', '2', 'J',
+        0x1B, '[', 'H'
+    };
+    if (sizeof(prefix) > out_max) {
+        return 0;
+    }
+    memcpy(out + o, prefix, sizeof(prefix));
+    o += sizeof(prefix);
+
+    for (size_t i = 0; i < in_len && o < out_max; ) {
+        uint8_t b = in[i];
+
+        if (b == 0x00) {
+            i++;
+            continue;
+        }
+
+        /* CSI: ESC [ params final */
+        if (b == 0x1B && (i + 1) < in_len && in[i + 1] == '[') {
+            size_t j = i + 2;
+            while (j < in_len && !(in[j] >= 0x40 && in[j] <= 0x7E)) {
+                j++;
+                if (j - i > 64) {
+                    break;
+                }
+            }
+            if (j < in_len && in[j] >= 0x40 && in[j] <= 0x7E) {
+                const uint8_t fin = in[j];
+                j++; /* past final */
+                /* CUP / HVP — как text.replace(/\x1B\[\d+;\d+H/g) + голый ESC[H */
+                if (fin == 'H' || fin == 'f') {
+                    i = j;
+                    continue;
+                }
+                /* остальное CSI (m, q, t, J, …) копируем */
+                size_t seq_len = j - i;
+                if (o + seq_len > out_max) {
+                    break;
+                }
+                memcpy(out + o, in + i, seq_len);
+                o += seq_len;
+                i = j;
+                continue;
+            }
+            /* битая последовательность — отдать ESC как есть */
+        }
+
+        /* 0x80/0x81/0x7F без замены: IRZ (win1251) → U+0402/U+0403/DEL,
+         * charReplaceMap показывает ▲ ▼ █ как в HTML writeTerminalScreen */
+        out[o++] = b;
+        i++;
+    }
+    return o;
+}
+
 static void terminal_task(void *arg)
 {
     uint8_t screen[4096];
-
+    /* expanded frame with per-cell SGR; static to keep task stack small */
+    static uint8_t screen_irz[8192];
     uint16_t screen_len;
 
     while (1)
     {
-        if (load_page_active || download_in_progress || !web_client_connected) {
+        /* Poll screen if web WS client OR IRZ TCP client is connected */
+        const bool any_client = web_client_connected || terminal_tcp_client_connected();
+        if (load_page_active || download_in_progress || !any_client) {
             vTaskDelay(pdMS_TO_TICKS(50));
             continue;
         }
@@ -366,7 +446,19 @@ static void terminal_task(void *arg)
             );
 
         if (ok && screen_len > 0) {
-            web_server_send_binary(screen, screen_len);
+            /* Браузер: сырой кадр — writeTerminalScreen в script.js (без изменений) */
+            if (web_client_connected) {
+                web_server_send_binary(screen, screen_len);
+            }
+            /* IRZ-Terminal TCP: растеризация в сетку 15x40 + home */
+            if (terminal_tcp_client_connected()) {
+                size_t n = terminal_format_screen_for_irz(
+                    screen, (size_t)screen_len,
+                    screen_irz, sizeof(screen_irz));
+                if (n > 0) {
+                    terminal_tcp_send(screen_irz, n);
+                }
+            }
         }
 
         vTaskDelay(pdMS_TO_TICKS(200));
