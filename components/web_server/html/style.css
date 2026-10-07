@@ -81,57 +81,107 @@ body {
     border-bottom: 3px solid #00ff88;
 }
 
-/* --- Основной макет --- */
-.main-layout { flex: 1; display: flex; flex-direction: column; min-height: 0; }
-.terminal-layout { flex: 1; display: flex; min-height: 0; }
+/* --- Основной макет терминала (адаптив: портрет / ландшафт) --- */
+.main-layout { flex: 1; display: flex; flex-direction: column; min-height: 0; min-width: 0; }
 
-/* --- Боковые панели --- */
-.side-buttons {
-    width: 70px;
-    background: #111827;
+#terminal-page.page.active {
     display: flex;
     flex-direction: column;
-    gap: 4px;
-    padding: 4px 4px;
-    flex-shrink: 0;
-}
-.side-buttons button {
-    width: 100%;
-    height: 32px;
-    background: #1e293b;
-    color: #00ff88;
-    border: 1px solid #334155;
-    border-radius: 3px;
-    cursor: pointer;
-    font-size: 11px;
-    font-family: Consolas, monospace;
-}
-.side-buttons button:active { background: #3b4a6b; }
-
-/* --- Центральная панель --- */
-.center-panel {
-    flex: 1;
-    display: flex;
-    flex-direction: column;
+    min-height: 0;
     min-width: 0;
+    overflow: hidden;
 }
 
-/* --- Панель состояния (лампы) внутри центральной панели --- */
-.state-panel {
+.terminal-layout {
+    flex: 1 1 0;
+    display: flex;
+    flex-direction: column; /* портрет по умолчанию */
+    min-height: 0;
+    min-width: 0;
+    overflow: hidden;
+}
+
+/* Зона экрана — жёстко ограничена, ничего не вылезает на кнопки */
+.terminal-main {
+    flex: 1 1 0;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    min-width: 0;
+    background: #000;
+    overflow: hidden;
+    position: relative;
+    contain: layout size;
+}
+
+#terminal-container {
+    flex: 1 1 0;
+    width: 100%;
+    height: 100%;
+    max-width: 100%;
+    max-height: 100%;
+    background: #000;
     display: flex;
     justify-content: center;
-    gap: 20px;
-    padding: 2px 8px;
+    align-items: center;
+    overflow: hidden !important;
+    min-height: 0;
+    min-width: 0;
+    padding: 0;
+    margin: 0;
+    border: none;
+    position: relative;
+    contain: strict;
+}
+
+/* xterm не может быть больше контейнера */
+#terminal-container .xterm,
+#terminal-container .xterm-viewport,
+#terminal-container .xterm-screen,
+#terminal-container .xterm-helpers {
+    max-width: 100% !important;
+    max-height: 100% !important;
+    overflow: hidden !important;
+}
+#terminal-container .xterm {
+    width: auto !important;
+    height: auto !important;
+    padding: 0 !important;
+    margin: 0 !important;
+}
+
+/* Кнопки + лампы */
+.controls-rail {
+    flex: 0 0 auto;
+    display: flex;
+    flex-direction: column;
     background: #111827;
+    border-top: 1px solid #1f2937;
+    min-height: 0;
+    max-height: 48%;
+    overflow: hidden;
+    z-index: 2;
+    flex-shrink: 0;
+}
+
+.state-panel {
+    display: flex;
+    flex-direction: row;
+    flex-wrap: nowrap;
+    justify-content: center;
+    align-items: center;
+    gap: 10px;
+    padding: 6px 8px;
+    background: #0f172a;
     border-bottom: 1px solid #1f2937;
     flex-shrink: 0;
-    flex-wrap: wrap;
 }
 .state-item {
     display: flex;
     align-items: center;
-    gap: 4px;
+    gap: 5px;
     font-size: 12px;
+    white-space: nowrap;
 }
 .state-led {
     width: 12px;
@@ -145,66 +195,122 @@ body {
 .state-led.active-wait { background: #ffaa00; box-shadow: 0 0 8px #ffaa00; }
 .state-led.active-run  { background: #00ff88; box-shadow: 0 0 8px #00ff88; }
 
-#terminal-container {
-    flex: 1;
-    background: black;
-    display: flex;
-    justify-content: center;
-    align-items: center;
-    overflow: hidden;
-    min-height: 0;
-    padding: 0;
-}
-
-/* --- Нижние кнопки --- */
-.bottom-buttons {
+.btn-grid {
     display: grid;
-    grid-template-columns: repeat(3, 1fr);
-    gap: 2px;
-    padding: 2px 4px;
-    background: #111827;
-    border-top: 1px solid #1f2937;
-    flex-shrink: 0;
+    grid-template-columns: repeat(6, 1fr);
+    grid-template-rows: repeat(4, minmax(36px, 1fr));
+    gap: 5px;
+    padding: 6px;
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow: hidden;
 }
-.bottom-buttons button {
-    height: 30px;
+.btn-grid button {
+    min-height: 36px;
+    height: 100%;
+    padding: 4px 3px;
     background: #1e293b;
     color: #00ff88;
     border: 1px solid #334155;
-    border-radius: 3px;
+    border-radius: 8px;
     cursor: pointer;
-    font-size: 11px;
+    font-size: 13px;
+    font-weight: 600;
     font-family: Consolas, monospace;
+    -webkit-tap-highlight-color: transparent;
+    touch-action: manipulation;
+    user-select: none;
+    grid-column: span 2;
+    display: flex;
+    align-items: center;
+    justify-content: center;
 }
-.bottom-buttons button:active { background: #3b4a6b; }
-
-/* --- Специальные кнопки --- */
-.side-buttons button.btn-start,
-.bottom-buttons button.btn-start {
+.btn-grid button:active { background: #3b4a6b; }
+.btn-grid button.btn-start,
+.btn-grid button.btn-stop { grid-column: span 3; }
+.btn-grid button.btn-start {
     background: #0f7a38;
     color: white;
     border: 1px solid #14a34b;
     box-shadow: 0 0 10px rgba(0,255,120,0.3);
 }
-.side-buttons button.btn-start:active,
-.bottom-buttons button.btn-start:active {
-    background: #0b5e2b;
-}
-.side-buttons button.btn-stop,
-.bottom-buttons button.btn-stop {
+.btn-grid button.btn-start:active { background: #0b5e2b; }
+.btn-grid button.btn-stop {
     background: #a51d1d;
     color: white;
     border: 1px solid #d22b2b;
     box-shadow: 0 0 10px rgba(255,0,0,0.3);
 }
-.side-buttons button.btn-stop:active,
-.bottom-buttons button.btn-stop:active {
-    background: #7f1515;
+.btn-grid button.btn-stop:active { background: #7f1515; }
+
+/* Портрет: терминал сверху, кнопки снизу */
+@media (orientation: portrait) {
+    .terminal-layout { flex-direction: column; }
+    .terminal-main { flex: 1 1 0; min-height: 0; }
+    .controls-rail {
+        flex: 0 0 auto;
+        max-height: 48%;
+        width: 100%;
+        border-top: 1px solid #1f2937;
+        border-left: none;
+    }
+    .state-panel { flex-direction: row; }
+}
+
+/* Ландшафт (в т.ч. 849×529): терминал слева, кнопки справа — без наложений */
+@media (orientation: landscape) {
+    .terminal-layout {
+        flex-direction: row;
+        align-items: stretch;
+    }
+    .terminal-main {
+        flex: 1 1 0;
+        min-width: 0;
+        min-height: 0;
+        overflow: hidden;
+    }
+    .controls-rail {
+        flex: 0 0 clamp(200px, 34vw, 280px);
+        width: clamp(200px, 34vw, 280px);
+        max-width: 38vw;
+        max-height: none;
+        height: auto;
+        align-self: stretch;
+        border-top: none;
+        border-left: 1px solid #1f2937;
+    }
+    .state-panel {
+        flex-direction: row;
+        flex-wrap: nowrap;
+        justify-content: space-around;
+        gap: 6px;
+        padding: 5px 6px;
+    }
+    .state-item { font-size: 11px; }
+    .btn-grid {
+        grid-template-rows: repeat(4, minmax(28px, 1fr));
+        gap: 4px;
+        padding: 5px;
+    }
+    .btn-grid button {
+        min-height: 28px;
+        font-size: 12px;
+        padding: 2px;
+        border-radius: 6px;
+    }
 }
 
 /* --- Страницы --- */
-.page { display: none; flex: 1; }
-.page.active { display: flex; }
+.page {
+    display: none;
+    flex: 1;
+    flex-direction: column;
+    min-height: 0;
+    min-width: 0;
+}
+.page.active {
+    display: flex;
+}
 
 /* --- Скрытие скролл-бара xterm --- */
 .xterm-viewport {
@@ -334,37 +440,25 @@ body {
     font-weight: bold;
 }
 
-/* ===== АДАПТАЦИЯ ДЛЯ МОБИЛЬНЫХ ===== */
-.mobile-only { display: none !important; }
-
+/* ===== МОБИЛЬНЫЕ: крупные кнопки (портрет) ===== */
 @media (max-width: 768px) {
-    .side-buttons { display: none !important; }
-    .bottom-buttons {
-        gap: 2px;
-        padding: 2px;
+    .topbar { height: 34px; padding: 0 8px; }
+    .topbar-title { font-size: 13px; }
+    .tab { height: 36px; font-size: 13px; }
+
+    .btn-grid {
+        gap: 8px;
+        padding: 10px;
     }
-    .bottom-buttons button {
-        height: 28px;
-        font-size: 10px;
+    .btn-grid button {
+        min-height: 52px;
+        font-size: 16px;
+        border-radius: 10px;
     }
-    .mobile-only { display: block !important; }
-    .mobile-placeholder {
-        background: transparent !important;
-        border: none !important;
-        box-shadow: none !important;
-        cursor: default !important;
-        pointer-events: none;
-        height: 28px;
-    }
-    .state-panel { gap: 10px; padding: 2px 4px; }
-    .state-item { font-size: 10px; }
-    .state-led { width: 10px; height: 10px; }
-    .topbar { height: 30px; padding: 0 6px; }
-    .topbar > div:first-child { font-size: 12px; }
-    .tab { height: 28px; font-size: 11px; }
-    #terminal-container { padding: 0; }
-    
-    /* Увеличение на мобильных */
+    .state-panel { gap: 14px; padding: 8px; }
+    .state-item { font-size: 13px; }
+    .state-led { width: 16px; height: 16px; }
+
     .download-panel {
         padding: 12px 12px;
         gap: 12px;
@@ -395,16 +489,16 @@ body {
         padding: 6px 2px;
     }
 }
+
 @media (max-width: 480px) {
-    .bottom-buttons button { height: 24px; font-size: 9px; }
-    .mobile-placeholder { height: 24px; }
-    .state-panel { gap: 6px; }
-    .state-item { font-size: 9px; }
-    .state-led { width: 8px; height: 8px; }
-    .topbar { height: 26px; }
-    .topbar > div:first-child { font-size: 10px; }
-    .tab { height: 24px; font-size: 10px; }
-    
+    .topbar { height: 32px; }
+    .tab { height: 34px; font-size: 12px; }
+    .btn-grid button {
+        min-height: 48px;
+        font-size: 15px;
+        padding: 8px 4px;
+    }
+
     .download-panel {
         padding: 8px 8px;
         gap: 10px;
@@ -424,16 +518,22 @@ body {
     .progress-container {
         height: 26px;
     }
-    .progress-text {
-        line-height: 26px;
-        font-size: 12px;
+}
+
+
+
+
+/* Широкий десктоп — чуть компактнее, но те же зоны */
+@media (min-width: 900px) and (min-height: 600px) {
+    .controls-rail {
+        border-top: 1px solid #1f2937;
     }
-    .download-info {
-        font-size: 12px;
-        gap: 2px 8px;
-        padding: 4px 2px;
+    .btn-grid button {
+        min-height: 44px;
+        font-size: 14px;
     }
 }
+
 /* ============================================================ */
 /* === ВКЛАДКА ПЕРЕПРОШИВКИ === */
 /* ============================================================ */

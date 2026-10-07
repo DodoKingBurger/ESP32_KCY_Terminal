@@ -6,6 +6,7 @@
    ============================================================ */
 
 // -------------------- Терминал (размер как в оригинале) --------------------
+/* Default; уточняется из ESC[8;cols;rows t в кадре */
 let termCols = 80;
 let termRows = 24;
 
@@ -109,14 +110,54 @@ function setStatus(mode) {
 
 // -------------------- Размер шрифта под контейнер (оригинал) --------------------
 function resizeTerminal() {
-    if (!container) return;
-    const rect = container.getBoundingClientRect();
-    if (rect.width < 10 || rect.height < 10) return;
-    const fontByWidth = rect.width / (termCols * 0.62);
-    const fontByHeight = rect.height / (termRows * 1.25);
-    const fontSize = Math.floor(Math.min(fontByWidth, fontByHeight));
-    term.options.fontSize = Math.max(8, Math.min(fontSize, 40));
-    term.refresh(0, termRows - 1);
+    if (!container || !term) return;
+
+    /* Только #terminal-container (не кнопки, не весь viewport) */
+    const availW = container.clientWidth;
+    const availH = container.clientHeight;
+    if (availW < 20 || availH < 20) return;
+
+    const el = term.element;
+    if (el) {
+        el.style.transform = '';
+        el.style.maxWidth = '100%';
+        el.style.maxHeight = '100%';
+    }
+
+    try { term.options.lineHeight = 1.0; } catch (e) {}
+
+    /*
+     * fontSize по cols×rows с запасом 4%, чтобы сетка всегда
+     * влезала в availW×availH (портрет и ландшафт, в т.ч. 849×529).
+     */
+    const fsByW = availW / (termCols * 0.62);
+    const fsByH = availH / (termRows * 1.15);
+    let fs = Math.floor(Math.min(fsByW, fsByH) * 0.96);
+    if (fs < 6) fs = 6;
+    if (fs > 36) fs = 36;
+
+    term.options.fontSize = fs;
+    term.refresh(0, Math.max(0, termRows - 1));
+
+    /* Контроль после отрисовки: если всё ещё больше — уменьшить */
+    if (el) {
+        const r = el.getBoundingClientRect();
+        if (r.width > availW + 2 || r.height > availH + 2) {
+            const s = Math.min(
+                availW / Math.max(1, r.width),
+                availH / Math.max(1, r.height)
+            );
+            fs = Math.max(6, Math.floor(fs * s * 0.95));
+            term.options.fontSize = fs;
+            term.refresh(0, Math.max(0, termRows - 1));
+        }
+    }
+}
+
+function scheduleResizeTerminal() {
+    requestAnimationFrame(function () {
+        requestAnimationFrame(resizeTerminal);
+    });
 }
 
 // -------------------- Парсинг CSI из кадра (оригинал) --------------------
@@ -129,7 +170,7 @@ function parseTerminalSize(text) {
         termRows = newRows;
         termCols = newCols;
         term.resize(termCols, termRows);
-        setTimeout(resizeTerminal, 0);
+        setTimeout(scheduleResizeTerminal, 0);
     }
 }
 
@@ -575,7 +616,7 @@ function showTab(name) {
                 startTerminalFrameWatchdog();
             }
         }
-        setTimeout(resizeTerminal, 50);
+        setTimeout(scheduleResizeTerminal, 50);
     } else if (name === 'downloads') {
         terminalActive = false;
         if (needsWsRefresh) {
@@ -925,12 +966,29 @@ document.addEventListener('DOMContentLoaded', () => {
     if (typeof onFwTargetChange === 'function') onFwTargetChange();
     fetchEspAppVersion();
     updateFirmwareButtons();
-    window.addEventListener('resize', resizeTerminal);
-    if (window.ResizeObserver && container) {
-        const ro = new ResizeObserver(resizeTerminal);
-        ro.observe(container);
+    window.addEventListener('resize', scheduleResizeTerminal);
+    window.addEventListener('orientationchange', function () {
+        setTimeout(scheduleResizeTerminal, 150);
+        setTimeout(scheduleResizeTerminal, 400);
+    });
+    if (window.matchMedia) {
+        try {
+            const mq = window.matchMedia('(orientation: landscape)');
+            const onOrient = function () { scheduleResizeTerminal(); };
+            if (mq.addEventListener) mq.addEventListener('change', onOrient);
+            else if (mq.addListener) mq.addListener(onOrient);
+        } catch (e) {}
     }
-    setTimeout(resizeTerminal, 100);
+    if (window.ResizeObserver && container) {
+        const ro = new ResizeObserver(function () { scheduleResizeTerminal(); });
+        ro.observe(container);
+        const layout = document.querySelector('.terminal-layout');
+        if (layout) ro.observe(layout);
+        const main = document.querySelector('.terminal-main');
+        if (main) ro.observe(main);
+    }
+    setTimeout(scheduleResizeTerminal, 50);
+    setTimeout(scheduleResizeTerminal, 200);
 });
 
 window.addEventListener('beforeunload', () => {
