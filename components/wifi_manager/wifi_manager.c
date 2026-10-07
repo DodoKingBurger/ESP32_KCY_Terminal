@@ -26,11 +26,13 @@
 #define REG_KUST    0x040D
 #define REG_SKV     0x040E
 
-/* Как часто перечитывать площадку (мс) */
+/* Как часто перечитывать площадку (мс) — только опрос, без пересоздания AP */
 #define SSID_REFRESH_MS  1000
 
-static char s_ap_ssid[33];
+static char s_ap_ssid[33];           /* текущий SSID SoftAP */
+static char s_pending_ssid[33];      /* кандидат с КСУ; применить после отключения клиентов */
 static bool s_wifi_started;
+static int  s_sta_count;             /* число подключённых станций */
 static SemaphoreHandle_t s_ssid_mu;
 
 
@@ -138,6 +140,11 @@ const char *wifi_manager_get_ap_ssid(void)
     return s_ap_ssid[0] ? s_ap_ssid : AP_SSID_FALLBACK;
 }
 
+/**
+ * Опрос площадки с КСУ.
+ * Если SSID изменился, а клиенты ещё подключены — только запоминаем pending.
+ * Применяем к SoftAP, когда станций 0 (пользователь отключился).
+ */
 bool wifi_manager_refresh_ssid(void)
 {
     if (!s_wifi_started) {
@@ -159,16 +166,59 @@ bool wifi_manager_refresh_ssid(void)
     if (s_ssid_mu) {
         xSemaphoreTake(s_ssid_mu, portMAX_DELAY);
     }
-    bool changed = (strncmp(s_ap_ssid, neu, sizeof(s_ap_ssid)) != 0);
-    if (changed) {
+
+    bool applied = false;
+    bool same_as_current = (strncmp(s_ap_ssid, neu, sizeof(s_ap_ssid)) == 0);
+
+    if (same_as_current) {
+        /* Актуальный SSID совпадает — pending не нужен */
+        s_pending_ssid[0] = '\0';
+    } else if (s_sta_count > 0) {
+        /* Клиенты онлайн: не трогаем AP, копим новое имя */
+        if (strncmp(s_pending_ssid, neu, sizeof(s_pending_ssid)) != 0) {
+            strncpy(s_pending_ssid, neu, sizeof(s_pending_ssid) - 1);
+            s_pending_ssid[sizeof(s_pending_ssid) - 1] = '\0';
+            ESP_LOGI(TAG,
+                     "SSID pending \"%s\" (clients=%d) — apply after disconnect",
+                     s_pending_ssid, s_sta_count);
+        }
+    } else {
+        /* Никого нет — можно сразу обновить SoftAP */
         strncpy(s_ap_ssid, neu, sizeof(s_ap_ssid) - 1);
         s_ap_ssid[sizeof(s_ap_ssid) - 1] = '\0';
-        changed = apply_ap_ssid(s_ap_ssid);
+        s_pending_ssid[0] = '\0';
+        applied = apply_ap_ssid(s_ap_ssid);
+    }
+
+    if (s_ssid_mu) {
+        xSemaphoreGive(s_ssid_mu);
+    }
+    return applied;
+}
+
+/** Применить отложенный SSID, если клиенты ушли */
+static void try_apply_pending_ssid(void)
+{
+    if (!s_wifi_started || s_sta_count > 0) {
+        return;
+    }
+    if (s_ssid_mu) {
+        xSemaphoreTake(s_ssid_mu, portMAX_DELAY);
+    }
+    if (s_pending_ssid[0] != '\0' &&
+        strncmp(s_ap_ssid, s_pending_ssid, sizeof(s_ap_ssid)) != 0) {
+        strncpy(s_ap_ssid, s_pending_ssid, sizeof(s_ap_ssid) - 1);
+        s_ap_ssid[sizeof(s_ap_ssid) - 1] = '\0';
+        s_pending_ssid[0] = '\0';
+        ESP_LOGI(TAG, "Applying pending SSID after last client left → \"%s\"",
+                 s_ap_ssid);
+        apply_ap_ssid(s_ap_ssid);
+    } else {
+        s_pending_ssid[0] = '\0';
     }
     if (s_ssid_mu) {
         xSemaphoreGive(s_ssid_mu);
     }
-    return changed;
 }
 
 static void ssid_refresh_task(void *arg)
@@ -187,11 +237,17 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
 {
     switch (event_id) {
         case WIFI_EVENT_AP_STACONNECTED:
-            ESP_LOGI(TAG, "Client connected");
+            s_sta_count++;
+            ESP_LOGI(TAG, "Client connected (sta=%d)", s_sta_count);
             break;
         case WIFI_EVENT_AP_STADISCONNECTED:
-            ESP_LOGI(TAG, "Client disconnected");
+            if (s_sta_count > 0) {
+                s_sta_count--;
+            }
+            ESP_LOGI(TAG, "Client disconnected (sta=%d)", s_sta_count);
             web_server_client_disconnected();
+            /* Точка пересоздаётся / SSID меняется только когда никто не подключён */
+            try_apply_pending_ssid();
             break;
         default:
             break;
@@ -203,6 +259,8 @@ void wifi_manager_start(void)
     if (s_ssid_mu == NULL) {
         s_ssid_mu = xSemaphoreCreateMutex();
     }
+    s_sta_count = 0;
+    s_pending_ssid[0] = '\0';
 
     resolve_ap_ssid();
 

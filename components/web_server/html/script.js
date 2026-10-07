@@ -108,6 +108,24 @@ function setStatus(mode) {
     }
 }
 
+// -------------------- Viewport (плашка адреса браузера) --------------------
+/**
+ * Подстраиваем --app-height под visualViewport (учитывает строку URL).
+ * Полностью скрыть адресную строку в обычном браузере нельзя —
+ * только через PWA / «На экран Домой» / fullscreen.
+ */
+function syncViewportHeight() {
+    var h;
+    if (window.visualViewport && window.visualViewport.height > 0) {
+        h = window.visualViewport.height;
+    } else {
+        h = window.innerHeight || document.documentElement.clientHeight;
+    }
+    if (h > 0) {
+        document.documentElement.style.setProperty('--app-height', h + 'px');
+    }
+}
+
 // -------------------- Размер шрифта под контейнер (оригинал) --------------------
 function resizeTerminal() {
     if (!container || !term) return;
@@ -155,6 +173,7 @@ function resizeTerminal() {
 }
 
 function scheduleResizeTerminal() {
+    syncViewportHeight();
     requestAnimationFrame(function () {
         requestAnimationFrame(resizeTerminal);
     });
@@ -966,11 +985,17 @@ document.addEventListener('DOMContentLoaded', () => {
     if (typeof onFwTargetChange === 'function') onFwTargetChange();
     fetchEspAppVersion();
     updateFirmwareButtons();
+    syncViewportHeight();
     window.addEventListener('resize', scheduleResizeTerminal);
     window.addEventListener('orientationchange', function () {
         setTimeout(scheduleResizeTerminal, 150);
         setTimeout(scheduleResizeTerminal, 400);
     });
+    /* Плашка URL: visualViewport меняется при показе/скрытии адресной строки */
+    if (window.visualViewport) {
+        window.visualViewport.addEventListener('resize', scheduleResizeTerminal);
+        window.visualViewport.addEventListener('scroll', scheduleResizeTerminal);
+    }
     if (window.matchMedia) {
         try {
             const mq = window.matchMedia('(orientation: landscape)');
